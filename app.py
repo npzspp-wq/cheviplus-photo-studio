@@ -17,15 +17,30 @@ APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
 DEFAULT_BG_1 = resource_path("assets/background_cheviplus_1.jpg")
 DEFAULT_BG_2 = resource_path("assets/background_cheviplus_2.jpg")
 DEFAULT_LOGO = resource_path("assets/logo_cheviplus.png")
+BACKGROUNDS_DIR = resource_path("assets/backgrounds")
 
-BUILTIN_BACKGROUNDS = {
-    "Фон 1 — сплошной фирменный": DEFAULT_BG_1,
+DEFAULT_BACKGROUND_NAMES = {
+    "Фон 1 — Cheviplus": DEFAULT_BG_1,
     "Фон 2 — DriveTime Auto Parts": DEFAULT_BG_2,
 }
+
+
+def discover_backgrounds():
+    backgrounds = dict(DEFAULT_BACKGROUND_NAMES)
+    if BACKGROUNDS_DIR.exists():
+        for path in sorted(BACKGROUNDS_DIR.iterdir(), key=lambda p: p.name.lower()):
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+                label = path.stem.replace("_", " ").replace("-", " ").strip()
+                if label:
+                    backgrounds[f"Фон — {label}"] = path
+    return backgrounds
+
+
+BUILTIN_BACKGROUNDS = discover_backgrounds()
 MODEL_DIR = resource_path("models")
 os.environ["U2NET_HOME"] = str(MODEL_DIR)
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 SETTINGS_FILE = APP_DIR / "cheviplus_settings.json"
 
 _REMBG_SESSION = None
@@ -222,7 +237,7 @@ class App(tk.Tk):
 
         self.input_var = tk.StringVar(value=str(APP_DIR / "input"))
         self.output_var = tk.StringVar(value=str(APP_DIR / "output"))
-        self.bg_choice_var = tk.StringVar(value="Фон 1 — сплошной фирменный")
+        self.bg_choice_var = tk.StringVar(value="Фон 1 — Cheviplus")
         self.bg_var = tk.StringVar(value=str(DEFAULT_BG_1))
         self.logo_var = tk.StringVar(value=str(DEFAULT_LOGO))
         self.size_var = tk.StringVar(value="2000")
@@ -244,9 +259,14 @@ class App(tk.Tk):
         )
         self.bg_combo.grid(row=2, column=1, padx=8, pady=6, sticky="ew")
         self.bg_combo.bind("<<ComboboxSelected>>", self.on_background_selected)
+        bg_buttons = ttk.Frame(form)
+        bg_buttons.grid(row=2, column=2, pady=6, sticky="w")
         ttk.Button(
-            form, text="Выбрать свой", command=self.choose_custom_background
-        ).grid(row=2, column=2, pady=6)
+            bg_buttons, text="Выбрать свой", command=self.choose_custom_background
+        ).pack(side="left")
+        ttk.Button(
+            bg_buttons, text="Обновить список", command=self.refresh_backgrounds
+        ).pack(side="left", padx=(6, 0))
 
         ttk.Label(form, text="Файл выбранного фона:").grid(row=3, column=0, sticky="w", pady=6)
         ttk.Entry(form, textvariable=self.bg_var, width=70, state="readonly").grid(
@@ -372,7 +392,7 @@ class App(tk.Tk):
     def reset_settings(self):
         self.input_var.set(str(APP_DIR / "input"))
         self.output_var.set(str(APP_DIR / "output"))
-        self.bg_choice_var.set("Фон 1 — сплошной фирменный")
+        self.bg_choice_var.set("Фон 1 — Cheviplus")
         self.bg_var.set(str(DEFAULT_BG_1))
         self.logo_var.set(str(DEFAULT_LOGO))
         self.size_var.set("2000")
@@ -394,6 +414,15 @@ class App(tk.Tk):
         cmd = (lambda: self.choose_folder(variable)) if folder else (lambda: self.choose_file(variable))
         ttk.Button(parent, text="Выбрать", command=cmd).grid(row=row, column=2, pady=6)
         parent.columnconfigure(1, weight=1)
+
+    def refresh_backgrounds(self):
+        global BUILTIN_BACKGROUNDS
+        BUILTIN_BACKGROUNDS = discover_backgrounds()
+        self.bg_combo["values"] = tuple(BUILTIN_BACKGROUNDS.keys()) + ("Свой фон…",)
+        if self.bg_choice_var.get() not in BUILTIN_BACKGROUNDS and self.bg_choice_var.get() != "Свой фон…":
+            self.bg_choice_var.set("Фон 1 — Cheviplus")
+            self.bg_var.set(str(DEFAULT_BG_1))
+        self.status.set(f"Фонов найдено: {len(BUILTIN_BACKGROUNDS)}")
 
     def on_background_selected(self, event=None):
         choice = self.bg_choice_var.get()
@@ -418,7 +447,7 @@ class App(tk.Tk):
             self.bg_var.set(path)
             self.status.set("Выбран собственный фон")
         elif self.bg_choice_var.get() == "Свой фон…":
-            self.bg_choice_var.set("Фон 1 — сплошной фирменный")
+            self.bg_choice_var.set("Фон 1 — Cheviplus")
             self.bg_var.set(str(DEFAULT_BG_1))
 
     def choose_folder(self, var):
