@@ -26,7 +26,7 @@ BACKGROUNDS_DIR = resource_path("assets/backgrounds")
 MODEL_DIR = resource_path("models")
 os.environ["U2NET_HOME"] = str(MODEL_DIR)
 
-APP_VERSION = "3.4"
+APP_VERSION = "3.5"
 SETTINGS_FILE = APP_DIR / "cheviplus_settings.json"
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -499,7 +499,11 @@ class App(tk.Tk):
         super().__init__()
         self.title(f"Cheviplus Photo Studio {APP_VERSION}")
         self.geometry("1280x820")
-        self.minsize(1120, 720)
+        self.minsize(980, 640)
+        try:
+            self.state("zoomed")
+        except Exception:
+            pass
         self.configure(bg="#f3f5f7")
 
         (APP_DIR / "input").mkdir(parents=True, exist_ok=True)
@@ -546,10 +550,33 @@ class App(tk.Tk):
         main = ttk.Panedwindow(self, orient="horizontal")
         main.pack(fill="both", expand=True, padx=14, pady=14)
 
-        left = ttk.Frame(main, padding=10)
+        left_host = ttk.Frame(main)
         right = ttk.Frame(main, padding=10)
-        main.add(left, weight=3)
+        main.add(left_host, weight=3)
         main.add(right, weight=2)
+
+        left_canvas = tk.Canvas(left_host, highlightthickness=0, bg="#f3f5f7")
+        left_scroll = ttk.Scrollbar(left_host, orient="vertical", command=left_canvas.yview)
+        left_canvas.configure(yscrollcommand=left_scroll.set)
+
+        left_scroll.pack(side="right", fill="y")
+        left_canvas.pack(side="left", fill="both", expand=True)
+
+        left = ttk.Frame(left_canvas, padding=10)
+        left_window = left_canvas.create_window((0, 0), window=left, anchor="nw")
+
+        def _sync_scroll_region(_event=None):
+            left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+
+        def _sync_left_width(event):
+            left_canvas.itemconfigure(left_window, width=event.width)
+
+        def _mousewheel(event):
+            left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        left.bind("<Configure>", _sync_scroll_region)
+        left_canvas.bind("<Configure>", _sync_left_width)
+        left_canvas.bind_all("<MouseWheel>", _mousewheel)
 
         self.input_var = tk.StringVar(value=str(APP_DIR / "input"))
         self.output_var = tk.StringVar(value=str(APP_DIR / "output"))
