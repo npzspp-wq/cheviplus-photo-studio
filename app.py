@@ -26,7 +26,7 @@ BACKGROUNDS_DIR = resource_path("assets/backgrounds")
 MODEL_DIR = resource_path("models")
 os.environ["U2NET_HOME"] = str(MODEL_DIR)
 
-APP_VERSION = "3.3"
+APP_VERSION = "3.4"
 SETTINGS_FILE = APP_DIR / "cheviplus_settings.json"
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -108,6 +108,122 @@ def trim_transparency(img: Image.Image):
     return img.crop(bbox) if bbox else img
 
 
+def analyze_object_shape(alpha: Image.Image):
+    """Определяет форму и рекомендуемые параметры отдельно для каждого фото."""
+    import numpy as np
+    from scipy import ndimage
+
+    arr = np.asarray(alpha, dtype=np.uint8)
+    binary = arr >= 72
+    labels, count = ndimage.label(binary)
+
+    if count:
+        sizes = np.bincount(labels.ravel())
+        sizes[0] = 0
+        main_id = int(sizes.argmax())
+        main = labels == main_id
+    else:
+        main = binary
+
+    ys, xs = np.nonzero(main)
+    if len(xs) < 50:
+        return {
+            "kind": "обычный",
+            "fill": 0.72,
+            "cleanup": 72,
+            "edge_expand": 1,
+            "opacity_floor": 120,
+        }
+
+    width = xs.max() - xs.min() + 1
+    height = ys.max() - ys.min() + 1
+    aspect = width / max(1, height)
+    occupancy = len(xs) / max(1, width * height)
+
+    if aspect >= 3.0:
+        kind = "длинный горизонтальный"
+        fill = 0.88
+    elif aspect <= 0.38:
+        kind = "длинный вертикальный"
+        fill = 0.84
+    elif occupancy < 0.28:
+        kind = "тонкий или сложный"
+        fill = 0.80
+    elif max(width, height) < min(alpha.size) * 0.35:
+        kind = "маленький предмет"
+        fill = 0.82
+    else:
+        kind = "обычный"
+        fill = 0.73
+
+    return {
+        "kind": kind,
+        "fill": fill,
+        "cleanup": 82,
+        "edge_expand": 1 if kind != "тонкий или сложный" else 2,
+        "opacity_floor": 138 if kind != "тонкий или сложный" else 112,
+    }
+
+
+def harden_alpha(alpha: Image.Image, opacity_floor=128):
+    """Не даёт новому фону просвечивать через непрозрачные части товара."""
+    import numpy as np
+    from scipy import ndimage
+
+    arr = np.asarray(alpha, dtype=np.uint8).astype(np.float32)
+    floor = max(70, min(190, int(opacity_floor)))
+
+    # Внутренние области объекта делаем полностью непрозрачными.
+    solid = arr >= floor
+    solid = ndimage.binary_closing(solid, structure=np.ones((3, 3)), iterations=1)
+    solid = ndimage.binary_fill_holes(solid)
+
+    # Сохраняем только узкую полупрозрачную кромку для естественного контура.
+    edge_band = ndimage.binary_dilation(solid, iterations=2) & ~ndimage.binary_erosion(solid, iterations=1)
+    result = np.zeros_like(arr)
+    result[solid] = 255
+    result[edge_band] = np.maximum(result[edge_band], arr[edge_band])
+
+    # Всё слабее 25 убираем, чтобы не оставались призраки логотипов.
+    result[result < 25] = 0
+    return Image.fromarray(result.astype(np.uint8), mode="L")
+
+
+def remove_isolated_artifacts(rgba: Image.Image, strength=82):
+    """Оставляет основной предмет и близкие реальные детали, убирая отдельные логотипы."""
+    import numpy as np
+    from scipy import ndimage
+
+    alpha = np.asarray(rgba.getchannel("A"), dtype=np.uint8)
+    binary = alpha >= 52
+    labels, count = ndimage.label(binary)
+    if count <= 1:
+        return rgba
+
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    main_id = int(sizes.argmax())
+    main_mask = labels == main_id
+
+    # Разрешаем компоненты, которые находятся близко к основному предмету.
+    distance = ndimage.distance_transform_edt(~main_mask)
+    keep = main_mask.copy()
+    main_size = max(1, int(sizes[main_id]))
+    for idx in range(1, count + 1):
+        if idx == main_id or sizes[idx] == 0:
+            continue
+        component = labels == idx
+        close = float(distance[component].min()) <= max(12, min(alpha.shape) * 0.025)
+        large_enough = sizes[idx] >= main_size * 0.018
+        if close and large_enough:
+            keep |= component
+
+    cleaned_alpha = np.where(keep, alpha, 0).astype(np.uint8)
+    result = rgba.copy()
+    result.putalpha(Image.fromarray(cleaned_alpha, mode="L"))
+    return result
+
+
 def clean_alpha_mask(alpha: Image.Image, cleanup=45, edge_expand=1):
     import numpy as np
     from scipy import ndimage
@@ -153,7 +269,13 @@ def clean_alpha_mask(alpha: Image.Image, cleanup=45, edge_expand=1):
     return Image.fromarray(cleaned.astype(np.uint8), mode="L")
 
 
-def remove_background(img: Image.Image, cleanup=45, edge_expand=1):
+def remove_background(
+    img: Image.Image,
+    cleanup=45,
+    edge_expand=1,
+    auto_settings=True,
+    prevent_background_showthrough=True,
+):
     from rembg import remove
 
     result = remove(
@@ -162,8 +284,23 @@ def remove_background(img: Image.Image, cleanup=45, edge_expand=1):
         alpha_matting=False,
         post_process_mask=False,
     ).convert("RGBA")
-    result.putalpha(clean_alpha_mask(result.getchannel("A"), cleanup, edge_expand))
-    return result
+
+    raw_alpha = result.getchannel("A")
+    recommendations = analyze_object_shape(raw_alpha)
+
+    if auto_settings:
+        cleanup = recommendations["cleanup"]
+        edge_expand = recommendations["edge_expand"]
+
+    cleaned_alpha = clean_alpha_mask(raw_alpha, cleanup, edge_expand)
+    result.putalpha(cleaned_alpha)
+    result = remove_isolated_artifacts(result, strength=cleanup)
+
+    if prevent_background_showthrough:
+        opacity_floor = recommendations["opacity_floor"] if auto_settings else 128
+        result.putalpha(harden_alpha(result.getchannel("A"), opacity_floor))
+
+    return result, recommendations
 
 
 def auto_straighten(product: Image.Image):
@@ -228,10 +365,21 @@ def compose_image(
     edge_expand,
     sharpness,
     straighten,
+    auto_settings,
+    prevent_background_showthrough,
 ):
     original = Image.open(source)
-    product = remove_background(original, cleanup=cleanup, edge_expand=edge_expand)
+    product, auto_info = remove_background(
+        original,
+        cleanup=cleanup,
+        edge_expand=edge_expand,
+        auto_settings=auto_settings,
+        prevent_background_showthrough=prevent_background_showthrough,
+    )
     product = trim_transparency(product)
+
+    if auto_settings:
+        product_fill = auto_info["fill"]
 
     if straighten:
         product = trim_transparency(auto_straighten(product))
@@ -423,6 +571,8 @@ class App(tk.Tk):
         self.edge_expand_var = tk.IntVar(value=1)
         self.sharpness_var = tk.IntVar(value=45)
         self.straighten_var = tk.BooleanVar(value=True)
+        self.auto_settings_var = tk.BooleanVar(value=True)
+        self.prevent_showthrough_var = tk.BooleanVar(value=True)
         self.workers_var = tk.IntVar(value=2)
 
         files_box = ttk.LabelFrame(left, text="1. Файлы и фон", padding=12)
@@ -486,11 +636,29 @@ class App(tk.Tk):
         self._scale_row(basic, 5, "Масштаб товара", self.fill_var, 0.60, 0.94, lambda v: f"{float(v)*100:.0f}%")
         self._scale_row(basic, 6, "Сила тени", self.shadow_strength_var, 0, 80, lambda v: f"{float(v):.0f}%")
 
-        advanced = ttk.LabelFrame(left, text="3. Качество краёв", padding=12)
+        advanced = ttk.LabelFrame(left, text="3. Автоматическая обработка каждого фото", padding=12)
         advanced.pack(fill="x", pady=(10, 0))
-        self._scale_row(advanced, 0, "Удаление остатков фона", self.cleanup_var, 0, 100, lambda v: f"{float(v):.0f}")
-        self._scale_row(advanced, 1, "Расширение края", self.edge_expand_var, 0, 4, lambda v: f"{float(v):.0f} px")
-        self._scale_row(advanced, 2, "Резкость товара", self.sharpness_var, 0, 100, lambda v: f"{float(v):.0f}")
+
+        ttk.Checkbutton(
+            advanced,
+            text="Автонастройка отдельно для каждого фото",
+            variable=self.auto_settings_var,
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
+
+        ttk.Checkbutton(
+            advanced,
+            text="Не допускать просвечивания нового фона через товар",
+            variable=self.prevent_showthrough_var,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        ttk.Label(
+            advanced,
+            text="При включённой автонастройке программа сама выбирает масштаб, очистку и толщину края.",
+        ).grid(row=2, column=0, columnspan=5, sticky="w", pady=(0, 8))
+
+        self._scale_row(advanced, 3, "Ручная очистка фона", self.cleanup_var, 0, 100, lambda v: f"{float(v):.0f}")
+        self._scale_row(advanced, 4, "Ручное расширение края", self.edge_expand_var, 0, 4, lambda v: f"{float(v):.0f} px")
+        self._scale_row(advanced, 5, "Резкость товара", self.sharpness_var, 0, 100, lambda v: f"{float(v):.0f}")
 
         source_bar = ttk.LabelFrame(left, text="4. Добавить фотографии", padding=10)
         source_bar.pack(fill="x", pady=(10, 0))
@@ -679,6 +847,8 @@ class App(tk.Tk):
             edge_expand=int(round(self.edge_expand_var.get())),
             sharpness=int(self.sharpness_var.get()),
             straighten=bool(self.straighten_var.get()),
+            auto_settings=bool(self.auto_settings_var.get()),
+            prevent_background_showthrough=bool(self.prevent_showthrough_var.get()),
         )
 
     def start_preview(self):
@@ -730,6 +900,12 @@ class App(tk.Tk):
         self.log.delete("1.0", "end")
         self.write_log(f"Cheviplus Photo Studio {APP_VERSION}")
         self.write_log(f"Фотографий: {len(files)}; потоков: {self.workers_var.get()}")
+        self.write_log(
+            "Автонастройка: "
+            + ("включена" if self.auto_settings_var.get() else "выключена")
+            + "; защита от просвечивания: "
+            + ("включена" if self.prevent_showthrough_var.get() else "выключена")
+        )
         threading.Thread(target=self.batch_worker, args=(files,), daemon=True).start()
 
     def batch_worker(self, files):
@@ -851,6 +1027,8 @@ class App(tk.Tk):
             "edge_expand": self.edge_expand_var.get(),
             "sharpness": self.sharpness_var.get(),
             "straighten": self.straighten_var.get(),
+            "auto_settings": self.auto_settings_var.get(),
+            "prevent_showthrough": self.prevent_showthrough_var.get(),
             "workers": self.workers_var.get(),
         }
 
@@ -888,6 +1066,8 @@ class App(tk.Tk):
             self.edge_expand_var.set(int(data.get("edge_expand", 1)))
             self.sharpness_var.set(int(data.get("sharpness", 45)))
             self.straighten_var.set(bool(data.get("straighten", True)))
+            self.auto_settings_var.set(bool(data.get("auto_settings", True)))
+            self.prevent_showthrough_var.set(bool(data.get("prevent_showthrough", True)))
             self.workers_var.set(int(data.get("workers", 2)))
 
             choice = data.get("background_choice", "Фон 1 — Cheviplus")
@@ -917,6 +1097,8 @@ class App(tk.Tk):
         self.edge_expand_var.set(1)
         self.sharpness_var.set(45)
         self.straighten_var.set(True)
+        self.auto_settings_var.set(True)
+        self.prevent_showthrough_var.set(True)
         self.workers_var.set(2)
         self.bg_choice_var.set("Фон 1 — Cheviplus")
         self.bg_var.set(str(DEFAULT_BG_1))
