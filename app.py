@@ -26,7 +26,7 @@ BACKGROUNDS_DIR = resource_path("assets/backgrounds")
 MODEL_DIR = resource_path("models")
 os.environ["U2NET_HOME"] = str(MODEL_DIR)
 
-APP_VERSION = "3.0"
+APP_VERSION = "3.2"
 SETTINGS_FILE = APP_DIR / "cheviplus_settings.json"
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -289,6 +289,15 @@ class App(tk.Tk):
 
         self._build()
         self.load_settings()
+        try:
+            folder = Path(self.input_var.get())
+            count = sum(
+                1 for p in folder.rglob("*")
+                if p.is_file() and p.suffix.lower() in SUPPORTED
+            ) if folder.exists() else 0
+            self.selection_info.set(f"Источник: папка ({count} файлов)")
+        except Exception:
+            pass
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(100, self.process_ui_queue)
 
@@ -388,21 +397,46 @@ class App(tk.Tk):
         self._scale_row(advanced, 1, "Расширение края", self.edge_expand_var, 0, 4, lambda v: f"{float(v):.0f} px")
         self._scale_row(advanced, 2, "Резкость товара", self.sharpness_var, 0, 100, lambda v: f"{float(v):.0f}")
 
+        source_bar = ttk.LabelFrame(left, text="4. Добавить фотографии", padding=10)
+        source_bar.pack(fill="x", pady=(10, 0))
+
+        ttk.Button(
+            source_bar, text="Выбрать фото",
+            command=self.choose_multiple_files
+        ).pack(side="left")
+
+        ttk.Button(
+            source_bar, text="Выбрать папку",
+            command=lambda: self.choose_folder(self.input_var)
+        ).pack(side="left", padx=6)
+
+        self.selection_info = tk.StringVar(value="Источник: папка исходных фотографий")
+        ttk.Label(source_bar, textvariable=self.selection_info).pack(side="left", padx=12)
+
         actions = ttk.Frame(left)
         actions.pack(fill="x", pady=12)
-        ttk.Button(actions, text="Выбрать несколько фото", command=self.choose_multiple_files).pack(side="left")
-        ttk.Button(actions, text="ПРЕДПРОСМОТР", command=self.start_preview).pack(side="left", padx=6)
+
+        ttk.Button(
+            actions, text="ПРЕДПРОСМОТР",
+            command=self.start_preview
+        ).pack(side="left")
+
         self.start_btn = tk.Button(
             actions,
-            text="ОБРАБОТАТЬ ПАКЕТ",
+            text="ОБРАБОТАТЬ",
             command=self.start,
             font=("Segoe UI", 11, "bold"),
             bg="#c71920", fg="white", activebackground="#9f1319",
-            relief="flat", padx=18, pady=8, cursor="hand2",
+            relief="flat", padx=22, pady=8, cursor="hand2",
         )
-        self.start_btn.pack(side="left")
-        self.cancel_btn = ttk.Button(actions, text="Остановить", command=self.request_cancel, state="disabled")
-        self.cancel_btn.pack(side="left", padx=6)
+        self.start_btn.pack(side="left", padx=8)
+
+        self.cancel_btn = ttk.Button(
+            actions, text="Остановить",
+            command=self.request_cancel,
+            state="disabled"
+        )
+        self.cancel_btn.pack(side="left")
 
         settings_bar = ttk.Frame(left)
         settings_bar.pack(fill="x")
@@ -453,6 +487,17 @@ class App(tk.Tk):
         path = filedialog.askdirectory(initialdir=variable.get() or str(APP_DIR))
         if path:
             variable.set(path)
+            if variable is self.input_var:
+                self.selected_files = []
+                try:
+                    count = sum(
+                        1 for p in Path(path).rglob("*")
+                        if p.is_file() and p.suffix.lower() in SUPPORTED
+                    )
+                except Exception:
+                    count = 0
+                self.selection_info.set(f"Выбрана папка: {count} файлов")
+                self.status.set(f"Выбрана папка: {count} файлов")
 
     def choose_file(self, variable):
         path = filedialog.askopenfilename(initialdir=str(Path(variable.get()).parent))
@@ -489,7 +534,9 @@ class App(tk.Tk):
         if paths:
             self.selected_files = [Path(p) for p in paths]
             self.preview_source = self.selected_files[0]
-            self.status.set(f"Выбрано фотографий: {len(self.selected_files)}")
+            count = len(self.selected_files)
+            self.selection_info.set(f"Выбрано файлов: {count}")
+            self.status.set(f"Выбрано файлов: {count}")
 
     def collect_files(self):
         files = list(self.selected_files)
@@ -645,8 +692,8 @@ class App(tk.Tk):
                     self.cancel_btn.config(state="disabled")
                     self.selected_files = []
                     self.status.set(f"Готово. Успешно: {ok}; ошибок: {errors}")
-                    title = "Обработка остановлена" if stopped else "Пакет завершён"
-                    messagebox.showinfo(title, f"Успешно: {ok}\nОшибок: {errors}")
+                    title = "Обработка остановлена" if stopped else "Обработка завершена"
+                    messagebox.showinfo(title, f"Обработано: {ok}\nОшибок: {errors}")
                 elif kind == "error":
                     self.start_btn.config(state="normal")
                     self.cancel_btn.config(state="disabled")
