@@ -26,9 +26,41 @@ BACKGROUNDS_DIR = resource_path("assets/backgrounds")
 MODEL_DIR = resource_path("models")
 os.environ["U2NET_HOME"] = str(MODEL_DIR)
 
-APP_VERSION = "3.2"
+APP_VERSION = "3.3"
 SETTINGS_FILE = APP_DIR / "cheviplus_settings.json"
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+
+EXPORT_PROFILES = {
+    "1С — 1024×685, JPG до 100 КБ": {
+        "width": 1024,
+        "height": 685,
+        "format": "JPG",
+        "target_kb": 95,
+        "quality": 88,
+    },
+    "Сайт — 1600×1200, JPG": {
+        "width": 1600,
+        "height": 1200,
+        "format": "JPG",
+        "target_kb": 350,
+        "quality": 90,
+    },
+    "Ozon / WB — 2000×2000, JPG": {
+        "width": 2000,
+        "height": 2000,
+        "format": "JPG",
+        "target_kb": 900,
+        "quality": 94,
+    },
+    "PNG — 2000×2000": {
+        "width": 2000,
+        "height": 2000,
+        "format": "PNG",
+        "target_kb": 0,
+        "quality": 95,
+    },
+    "Свои параметры": None,
+}
 
 DEFAULT_BACKGROUND_NAMES = {
     "Фон 1 — Cheviplus": DEFAULT_BG_1,
@@ -186,7 +218,8 @@ def compose_image(
     source,
     background_path,
     logo_path,
-    canvas_size,
+    canvas_width,
+    canvas_height,
     product_fill,
     add_logo,
     shadow,
@@ -216,10 +249,13 @@ def compose_image(
         )
     product = Image.merge("RGBA", (*rgb.split(), product.getchannel("A")))
 
-    bg = fit_cover(Image.open(background_path).convert("RGB"), (canvas_size, canvas_size)).convert("RGBA")
+    bg = fit_cover(
+        Image.open(background_path).convert("RGB"),
+        (canvas_width, canvas_height),
+    ).convert("RGBA")
 
-    max_w = int(canvas_size * product_fill)
-    max_h = int(canvas_size * product_fill)
+    max_w = int(canvas_width * product_fill)
+    max_h = int(canvas_height * product_fill)
     ratio = min(max_w / max(1, product.width), max_h / max(1, product.height))
     new_size = (max(1, int(product.width * ratio)), max(1, int(product.height * ratio)))
     product = product.resize(new_size, Image.Resampling.LANCZOS)
@@ -230,9 +266,9 @@ def compose_image(
         )
         product = Image.merge("RGBA", (*resized_rgb.split(), product.getchannel("A")))
 
-    x = (canvas_size - product.width) // 2
-    y = int(canvas_size * 0.54 - product.height / 2)
-    y = max(20, min(y, canvas_size - product.height - 20))
+    x = (canvas_width - product.width) // 2
+    y = int(canvas_height * 0.54 - product.height / 2)
+    y = max(20, min(y, canvas_height - product.height - 20))
 
     if shadow:
         add_shadow(bg, product, (x, y), shadow_strength)
@@ -240,27 +276,67 @@ def compose_image(
 
     if add_logo and logo_path.exists():
         logo = Image.open(logo_path).convert("RGBA")
-        max_logo_w = int(canvas_size * 0.15)
+        max_logo_w = int(canvas_width * 0.15)
         scale = min(1.0, max_logo_w / max(1, logo.width))
         logo = logo.resize(
             (max(1, int(logo.width * scale)), max(1, int(logo.height * scale))),
             Image.Resampling.LANCZOS,
         )
-        margin = int(canvas_size * 0.025)
+        margin = int(min(canvas_width, canvas_height) * 0.025)
         bg.alpha_composite(
             logo,
-            (canvas_size - logo.width - margin, canvas_size - logo.height - margin),
+            (canvas_width - logo.width - margin, canvas_height - logo.height - margin),
         )
     return bg
 
 
-def save_result(image, source, output_dir, output_format):
+def save_result(
+    image,
+    source,
+    output_dir,
+    output_format,
+    target_kb=0,
+    jpeg_quality=90,
+):
+    import io
+
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = source.stem + "_cheviplus"
     fmt = output_format.upper()
+
     if fmt == "JPG":
         out = output_dir / f"{stem}.jpg"
-        image.convert("RGB").save(out, quality=95, optimize=True)
+        rgb = image.convert("RGB")
+        quality = max(45, min(95, int(jpeg_quality)))
+        target_bytes = int(target_kb * 1024) if target_kb else 0
+
+        if target_bytes:
+            best = None
+            for q in range(quality, 44, -3):
+                buffer = io.BytesIO()
+                rgb.save(
+                    buffer,
+                    format="JPEG",
+                    quality=q,
+                    optimize=True,
+                    progressive=True,
+                    subsampling="4:2:0",
+                    dpi=(96, 96),
+                )
+                data = buffer.getvalue()
+                best = data
+                if len(data) <= target_bytes:
+                    break
+            out.write_bytes(best)
+        else:
+            rgb.save(
+                out,
+                quality=quality,
+                optimize=True,
+                progressive=True,
+                subsampling="4:2:0",
+                dpi=(96, 96),
+            )
     elif fmt == "WEBP":
         out = output_dir / f"{stem}.webp"
         image.convert("RGB").save(out, quality=93, method=6)
@@ -332,7 +408,11 @@ class App(tk.Tk):
         self.bg_choice_var = tk.StringVar(value="Фон 1 — Cheviplus")
         self.bg_var = tk.StringVar(value=str(DEFAULT_BG_1))
         self.logo_var = tk.StringVar(value=str(DEFAULT_LOGO))
-        self.size_var = tk.StringVar(value="2000")
+        self.profile_var = tk.StringVar(value="1С — 1024×685, JPG до 100 КБ")
+        self.width_var = tk.StringVar(value="1024")
+        self.height_var = tk.StringVar(value="685")
+        self.target_kb_var = tk.StringVar(value="95")
+        self.jpeg_quality_var = tk.StringVar(value="88")
         self.fill_var = tk.DoubleVar(value=0.86)
         self.format_var = tk.StringVar(value="JPG")
         self.logo_enabled = tk.BooleanVar(value=False)
@@ -368,28 +448,43 @@ class App(tk.Tk):
 
         basic = ttk.LabelFrame(left, text="2. Основные настройки", padding=12)
         basic.pack(fill="x", pady=(10, 0))
-        ttk.Label(basic, text="Размер:").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(
-            basic, textvariable=self.size_var,
-            values=("1200", "1600", "2000", "2500", "3000"),
-            width=9, state="readonly"
-        ).grid(row=0, column=1, padx=6)
-        ttk.Label(basic, text="Формат:").grid(row=0, column=2, padx=(20, 0))
+        ttk.Label(basic, text="Профиль экспорта:").grid(row=0, column=0, sticky="w")
+        self.profile_combo = ttk.Combobox(
+            basic,
+            textvariable=self.profile_var,
+            values=tuple(EXPORT_PROFILES.keys()),
+            state="readonly",
+            width=34,
+        )
+        self.profile_combo.grid(row=0, column=1, columnspan=3, sticky="w", padx=6)
+        self.profile_combo.bind("<<ComboboxSelected>>", self.apply_export_profile)
+
+        ttk.Label(basic, text="Потоки:").grid(row=0, column=4, padx=(20, 0))
+        ttk.Spinbox(basic, from_=1, to=4, textvariable=self.workers_var, width=5).grid(row=0, column=5)
+
+        ttk.Label(basic, text="Ширина:").grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ttk.Entry(basic, textvariable=self.width_var, width=9).grid(row=1, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(basic, text="Высота:").grid(row=1, column=2, sticky="e", pady=(10, 0))
+        ttk.Entry(basic, textvariable=self.height_var, width=9).grid(row=1, column=3, sticky="w", pady=(10, 0))
+        ttk.Label(basic, text="Формат:").grid(row=1, column=4, sticky="e", pady=(10, 0))
         ttk.Combobox(
             basic, textvariable=self.format_var,
             values=("JPG", "PNG", "WEBP"),
             width=8, state="readonly"
-        ).grid(row=0, column=3, padx=6)
-        ttk.Label(basic, text="Потоки:").grid(row=0, column=4, padx=(20, 0))
-        ttk.Spinbox(basic, from_=1, to=4, textvariable=self.workers_var, width=5).grid(row=0, column=5)
+        ).grid(row=1, column=5, pady=(10, 0))
+
+        ttk.Label(basic, text="Цель, КБ:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(basic, textvariable=self.target_kb_var, width=9).grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(basic, text="Качество JPG:").grid(row=2, column=2, sticky="e", pady=(8, 0))
+        ttk.Entry(basic, textvariable=self.jpeg_quality_var, width=9).grid(row=2, column=3, sticky="w", pady=(8, 0))
 
         ttk.Checkbutton(basic, text="Мягкая тень", variable=self.shadow_enabled).grid(row=1, column=0, sticky="w", pady=(10, 0))
-        ttk.Checkbutton(basic, text="Автовыравнивание длинных деталей", variable=self.straighten_var).grid(row=1, column=1, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Checkbutton(basic, text="Вложенные папки", variable=self.recursive_enabled).grid(row=1, column=4, columnspan=2, sticky="w", pady=(10, 0))
-        ttk.Checkbutton(basic, text="Отдельный логотип поверх фона", variable=self.logo_enabled).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(basic, text="Автовыравнивание длинных деталей", variable=self.straighten_var).grid(row=3, column=1, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Checkbutton(basic, text="Вложенные папки", variable=self.recursive_enabled).grid(row=3, column=4, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Checkbutton(basic, text="Отдельный логотип поверх фона", variable=self.logo_enabled).grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
-        self._scale_row(basic, 3, "Масштаб товара", self.fill_var, 0.60, 0.94, lambda v: f"{float(v)*100:.0f}%")
-        self._scale_row(basic, 4, "Сила тени", self.shadow_strength_var, 0, 80, lambda v: f"{float(v):.0f}%")
+        self._scale_row(basic, 5, "Масштаб товара", self.fill_var, 0.60, 0.94, lambda v: f"{float(v)*100:.0f}%")
+        self._scale_row(basic, 6, "Сила тени", self.shadow_strength_var, 0, 80, lambda v: f"{float(v):.0f}%")
 
         advanced = ttk.LabelFrame(left, text="3. Качество краёв", padding=12)
         advanced.pack(fill="x", pady=(10, 0))
@@ -483,6 +578,17 @@ class App(tk.Tk):
         command = (lambda: self.choose_folder(variable)) if folder else (lambda: self.choose_file(variable))
         ttk.Button(parent, text="Выбрать", command=command).grid(row=row, column=2, pady=5)
 
+    def apply_export_profile(self, _event=None):
+        profile = EXPORT_PROFILES.get(self.profile_var.get())
+        if not profile:
+            return
+        self.width_var.set(str(profile["width"]))
+        self.height_var.set(str(profile["height"]))
+        self.format_var.set(profile["format"])
+        self.target_kb_var.set(str(profile["target_kb"]))
+        self.jpeg_quality_var.set(str(profile["quality"]))
+        self.status.set(f"Выбран профиль: {self.profile_var.get()}")
+
     def choose_folder(self, variable):
         path = filedialog.askdirectory(initialdir=variable.get() or str(APP_DIR))
         if path:
@@ -563,7 +669,8 @@ class App(tk.Tk):
         return dict(
             background_path=Path(self.bg_var.get()),
             logo_path=Path(self.logo_var.get()),
-            canvas_size=int(self.size_var.get()),
+            canvas_width=max(200, int(self.width_var.get())),
+            canvas_height=max(200, int(self.height_var.get())),
             product_fill=float(self.fill_var.get()),
             add_logo=bool(self.logo_enabled.get()),
             shadow=bool(self.shadow_enabled.get()),
@@ -644,7 +751,14 @@ class App(tk.Tk):
             except Exception:
                 pass
             image = compose_image(source, **options)
-            out = save_result(image, source, target_dir, self.format_var.get())
+            out = save_result(
+                image,
+                source,
+                target_dir,
+                self.format_var.get(),
+                target_kb=max(0, int(self.target_kb_var.get() or 0)),
+                jpeg_quality=max(45, min(95, int(self.jpeg_quality_var.get() or 88))),
+            )
             return source, out, None
 
         try:
@@ -722,7 +836,11 @@ class App(tk.Tk):
             "output": self.output_var.get(),
             "background_choice": self.bg_choice_var.get(),
             "background_path": self.bg_var.get(),
-            "size": self.size_var.get(),
+            "profile": self.profile_var.get(),
+            "width": self.width_var.get(),
+            "height": self.height_var.get(),
+            "target_kb": self.target_kb_var.get(),
+            "jpeg_quality": self.jpeg_quality_var.get(),
             "fill": self.fill_var.get(),
             "format": self.format_var.get(),
             "logo_enabled": self.logo_enabled.get(),
@@ -755,7 +873,11 @@ class App(tk.Tk):
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             self.input_var.set(data.get("input", self.input_var.get()))
             self.output_var.set(data.get("output", self.output_var.get()))
-            self.size_var.set(str(data.get("size", self.size_var.get())))
+            self.profile_var.set(data.get("profile", self.profile_var.get()))
+            self.width_var.set(str(data.get("width", self.width_var.get())))
+            self.height_var.set(str(data.get("height", self.height_var.get())))
+            self.target_kb_var.set(str(data.get("target_kb", self.target_kb_var.get())))
+            self.jpeg_quality_var.set(str(data.get("jpeg_quality", self.jpeg_quality_var.get())))
             self.fill_var.set(float(data.get("fill", self.fill_var.get())))
             self.format_var.set(data.get("format", self.format_var.get()))
             self.logo_enabled.set(bool(data.get("logo_enabled", False)))
@@ -780,7 +902,11 @@ class App(tk.Tk):
             self.status.set("Настройки по умолчанию")
 
     def reset_settings(self):
-        self.size_var.set("2000")
+        self.profile_var.set("1С — 1024×685, JPG до 100 КБ")
+        self.width_var.set("1024")
+        self.height_var.set("685")
+        self.target_kb_var.set("95")
+        self.jpeg_quality_var.set("88")
         self.fill_var.set(0.86)
         self.format_var.set("JPG")
         self.logo_enabled.set(False)
