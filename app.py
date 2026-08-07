@@ -26,7 +26,7 @@ BACKGROUNDS_DIR = resource_path("assets/backgrounds")
 MODEL_DIR = resource_path("models")
 os.environ["U2NET_HOME"] = str(MODEL_DIR)
 
-APP_VERSION = "3.8"
+APP_VERSION = "3.9"
 SETTINGS_FILE = APP_DIR / "cheviplus_settings.json"
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -324,6 +324,8 @@ def remove_background(
     auto_settings=True,
     prevent_background_showthrough=True,
     strict_logo_cleanup=True,
+    solid_object=False,
+    solid_hole_limit=8,
 ):
     from rembg import remove
 
@@ -336,6 +338,9 @@ def remove_background(
 
     raw_alpha = result.getchannel("A")
     recommendations = analyze_object_shape(raw_alpha)
+
+    if solid_object:
+        raw_alpha = reinforce_solid_object_alpha(raw_alpha, hole_limit_percent=solid_hole_limit)
 
     if auto_settings:
         cleanup = recommendations["cleanup"]
@@ -458,42 +463,44 @@ def remove_product_logo_region(image: Image.Image, strength=55):
 
 
 def reinforce_solid_object_alpha(alpha: Image.Image, hole_limit_percent=8):
+    """Восстанавливает слабую маску хрома ДО обычной очистки."""
     import numpy as np
     from scipy import ndimage
 
     arr = np.asarray(alpha, dtype=np.uint8)
-    base = arr >= 70
-    labels, count = ndimage.label(base)
+    core = arr >= 110
+    labels, count = ndimage.label(core)
     if count == 0:
         return alpha
-
-    sizes = np.bincount(labels.ravel())
-    sizes[0] = 0
+    sizes = np.bincount(labels.ravel()); sizes[0] = 0
     main_id = int(sizes.argmax())
-    main = labels == main_id
-    main_size = max(1, int(sizes[main_id]))
+    core = labels == main_id
 
-    closed = ndimage.binary_closing(main, structure=np.ones((5, 5)), iterations=1)
-    filled = ndimage.binary_fill_holes(closed)
-    holes = filled & ~closed
+    weak = arr >= 8
+    grown = ndimage.binary_dilation(core, structure=np.ones((5, 5)), iterations=6)
+    candidate = weak & grown
+    merged = ndimage.binary_closing(core | candidate, structure=np.ones((5, 5)), iterations=2)
 
-    hole_labels, hole_count = ndimage.label(holes)
+    filled = ndimage.binary_fill_holes(merged)
+    holes = filled & ~merged
+    hlabels, hcount = ndimage.label(holes)
     fill_small = np.zeros_like(holes, dtype=bool)
-    max_hole = main_size * max(1, min(25, int(hole_limit_percent))) / 100.0
-
-    if hole_count:
-        hs = np.bincount(hole_labels.ravel())
-        hs[0] = 0
-        for i in range(1, hole_count + 1):
+    main_size = max(1, int(merged.sum()))
+    max_hole = main_size * max(1, min(30, int(hole_limit_percent))) / 100.0
+    if hcount:
+        hs = np.bincount(hlabels.ravel()); hs[0] = 0
+        for i in range(1, hcount + 1):
             if 0 < hs[i] <= max_hole:
-                fill_small |= (hole_labels == i)
+                fill_small |= (hlabels == i)
+    merged |= fill_small
 
+    eroded = ndimage.binary_erosion(merged, structure=np.ones((3, 3)), iterations=1)
     result = arr.copy()
-    # Делает внутренние части товара непрозрачными, но сохраняет внешний край.
-    inside = ndimage.binary_erosion(main | fill_small, structure=np.ones((3, 3)), iterations=1)
-    result[inside] = 255
+    result[eroded] = 255
     result[fill_small] = 255
-    result[result < 18] = 0
+    edge = merged & ~eroded
+    result[edge] = np.maximum(result[edge], 170)
+    result[~merged & (arr < 18)] = 0
     return Image.fromarray(result.astype(np.uint8), mode="L")
 
 
@@ -527,14 +534,9 @@ def compose_image(
         auto_settings=auto_settings,
         prevent_background_showthrough=prevent_background_showthrough,
         strict_logo_cleanup=strict_logo_cleanup,
+        solid_object=solid_object,
+        solid_hole_limit=solid_hole_limit,
     )
-    if solid_object:
-        product.putalpha(
-            reinforce_solid_object_alpha(
-                product.getchannel("A"),
-                hole_limit_percent=solid_hole_limit,
-            )
-        )
     product = trim_transparency(product)
 
     if auto_settings:
@@ -847,7 +849,7 @@ class App(tk.Tk):
 
         ttk.Checkbutton(
             advanced,
-            text="Непрозрачный товар — для хрома, глянца и чёрного пластика",
+            text="ХРОМ/ГЛЯНЕЦ — восстанавливать непрозрачность до очистки",
             variable=self.solid_object_var,
         ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(0, 4))
 
