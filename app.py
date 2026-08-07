@@ -26,8 +26,8 @@ BACKGROUNDS_DIR = resource_path("assets/backgrounds")
 MODEL_DIR = resource_path("models")
 os.environ["U2NET_HOME"] = str(MODEL_DIR)
 
-APP_VERSION = "4.0"
-APP_BUILD = "2026.08.07.01"
+APP_VERSION = "4.1"
+APP_BUILD = "2026.08.07.02"
 SETTINGS_FILE = APP_DIR / "cheviplus_settings.json"
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -325,8 +325,6 @@ def remove_background(
     auto_settings=True,
     prevent_background_showthrough=True,
     strict_logo_cleanup=True,
-    solid_object=False,
-    solid_hole_limit=8,
 ):
     from rembg import remove
 
@@ -339,9 +337,6 @@ def remove_background(
 
     raw_alpha = result.getchannel("A")
     recommendations = analyze_object_shape(raw_alpha)
-
-    if solid_object:
-        raw_alpha = reinforce_solid_object_alpha(raw_alpha, hole_limit_percent=solid_hole_limit)
 
     if auto_settings:
         cleanup = recommendations["cleanup"]
@@ -462,102 +457,6 @@ def remove_product_logo_region(image: Image.Image, strength=55):
     return Image.fromarray(arr,mode="RGBA")
 
 
-
-def reinforce_solid_object_alpha(alpha: Image.Image, hole_limit_percent=8):
-    """Восстанавливает слабую маску хрома ДО обычной очистки."""
-    import numpy as np
-    from scipy import ndimage
-
-    arr = np.asarray(alpha, dtype=np.uint8)
-    core = arr >= 110
-    labels, count = ndimage.label(core)
-    if count == 0:
-        return alpha
-    sizes = np.bincount(labels.ravel()); sizes[0] = 0
-    main_id = int(sizes.argmax())
-    core = labels == main_id
-
-    weak = arr >= 8
-    grown = ndimage.binary_dilation(core, structure=np.ones((5, 5)), iterations=6)
-    candidate = weak & grown
-    merged = ndimage.binary_closing(core | candidate, structure=np.ones((5, 5)), iterations=2)
-
-    filled = ndimage.binary_fill_holes(merged)
-    holes = filled & ~merged
-    hlabels, hcount = ndimage.label(holes)
-    fill_small = np.zeros_like(holes, dtype=bool)
-    main_size = max(1, int(merged.sum()))
-    max_hole = main_size * max(1, min(30, int(hole_limit_percent))) / 100.0
-    if hcount:
-        hs = np.bincount(hlabels.ravel()); hs[0] = 0
-        for i in range(1, hcount + 1):
-            if 0 < hs[i] <= max_hole:
-                fill_small |= (hlabels == i)
-    merged |= fill_small
-
-    eroded = ndimage.binary_erosion(merged, structure=np.ones((3, 3)), iterations=1)
-    result = arr.copy()
-    result[eroded] = 255
-    result[fill_small] = 255
-    edge = merged & ~eroded
-    result[edge] = np.maximum(result[edge], 170)
-    result[~merged & (arr < 18)] = 0
-    return Image.fromarray(result.astype(np.uint8), mode="L")
-
-
-
-def cheviplus_banner_mask(original: Image.Image, alpha: Image.Image):
-    import numpy as np
-    from scipy import ndimage
-
-    rgb = np.asarray(original.convert("RGB"), dtype=np.float32)
-    a = np.asarray(alpha, dtype=np.uint8)
-    h, w, _ = rgb.shape
-
-    # Оцениваем цвет фирменного баннера по внешней рамке снимка.
-    b = max(8, int(min(h, w) * 0.05))
-    border = np.concatenate([
-        rgb[:b].reshape(-1, 3),
-        rgb[-b:].reshape(-1, 3),
-        rgb[:, :b].reshape(-1, 3),
-        rgb[:, -b:].reshape(-1, 3),
-    ])
-    bg = np.median(border, axis=0)
-
-    # Совмещаем rembg с отличием от баннера.
-    diff = np.linalg.norm(rgb - bg[None, None, :], axis=2)
-    seed = (a >= 35) | (diff >= 28)
-
-    seed = ndimage.binary_opening(seed, np.ones((3, 3)))
-    seed = ndimage.binary_closing(seed, np.ones((7, 7)), iterations=2)
-
-    labels, count = ndimage.label(seed)
-    if count:
-        sizes = np.bincount(labels.ravel())
-        sizes[0] = 0
-        seed = labels == int(sizes.argmax())
-
-    # Хром/глянец: небольшие внутренние "дыры" закрываем.
-    filled = ndimage.binary_fill_holes(seed)
-    holes = filled & ~seed
-    hole_labels, hole_count = ndimage.label(holes)
-    if hole_count:
-        sizes = np.bincount(hole_labels.ravel())
-        sizes[0] = 0
-        max_hole = max(1, int(seed.sum() * 0.12))
-        for i in range(1, hole_count + 1):
-            if sizes[i] <= max_hole:
-                seed |= (hole_labels == i)
-
-    eroded = ndimage.binary_erosion(seed, np.ones((3, 3)), iterations=1)
-    edge = seed & ~eroded
-
-    out = np.zeros_like(a)
-    out[eroded] = 255
-    out[edge] = np.maximum(a[edge], 185)
-    return Image.fromarray(out.astype(np.uint8), mode="L")
-
-
 def compose_image(
     source,
     background_path,
@@ -577,9 +476,6 @@ def compose_image(
     strict_logo_cleanup,
     remove_product_logo,
     logo_remove_strength,
-    solid_object,
-    solid_hole_limit,
-    processing_mode,
 ):
     original = Image.open(source)
     product, auto_info = remove_background(
@@ -589,13 +485,7 @@ def compose_image(
         auto_settings=auto_settings,
         prevent_background_showthrough=prevent_background_showthrough,
         strict_logo_cleanup=strict_logo_cleanup,
-        solid_object=solid_object,
-        solid_hole_limit=solid_hole_limit,
     )
-    if processing_mode.startswith("Cheviplus Studio"):
-        product.putalpha(
-            cheviplus_banner_mask(original, product.getchannel("A"))
-        )
     product = trim_transparency(product)
 
     if auto_settings:
@@ -764,7 +654,7 @@ class App(tk.Tk):
         ).pack(side="left", padx=24, pady=18)
         tk.Label(
             header,
-            text=f"Build {APP_BUILD}  •  Профессиональная пакетная подготовка фотографий",
+            text=f"STABLE • Build {APP_BUILD} • стабильное ядро 3.7",
             font=("Segoe UI", 10),
             fg="#cfd5db",
             bg="#20252b",
@@ -817,18 +707,15 @@ class App(tk.Tk):
         self.shadow_enabled = tk.BooleanVar(value=True)
         self.shadow_strength_var = tk.IntVar(value=35)
         self.recursive_enabled = tk.BooleanVar(value=True)
-        self.cleanup_var = tk.IntVar(value=45)
+        self.cleanup_var = tk.IntVar(value=82)
         self.edge_expand_var = tk.IntVar(value=1)
         self.sharpness_var = tk.IntVar(value=45)
-        self.straighten_var = tk.BooleanVar(value=True)
+        self.straighten_var = tk.BooleanVar(value=False)
         self.auto_settings_var = tk.BooleanVar(value=False)
         self.prevent_showthrough_var = tk.BooleanVar(value=True)
         self.strict_logo_cleanup_var = tk.BooleanVar(value=False)
         self.remove_product_logo_var = tk.BooleanVar(value=False)
         self.logo_remove_strength_var = tk.IntVar(value=55)
-        self.solid_object_var = tk.BooleanVar(value=True)
-        self.solid_hole_limit_var = tk.IntVar(value=8)
-        self.processing_mode_var = tk.StringVar(value="Cheviplus Studio — старый фирменный баннер")
         self.workers_var = tk.IntVar(value=2)
 
         files_box = ttk.LabelFrame(left, text="1. Файлы и фон", padding=12)
@@ -854,20 +741,7 @@ class App(tk.Tk):
 
         basic = ttk.LabelFrame(left, text="2. Основные настройки", padding=12)
         basic.pack(fill="x", pady=(10, 0))
-        ttk.Label(basic, text="Режим обработки:").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(
-            basic,
-            textvariable=self.processing_mode_var,
-            values=(
-                "Cheviplus Studio — старый фирменный баннер",
-                "Хром / глянец",
-                "Обычный",
-            ),
-            state="readonly",
-            width=38,
-        ).grid(row=0, column=1, columnspan=3, sticky="w", padx=6, pady=(0, 8))
-
-        ttk.Label(basic, text="Профиль экспорта:").grid(row=1, column=0, sticky="w")
+        ttk.Label(basic, text="Профиль экспорта:").grid(row=0, column=0, sticky="w")
         self.profile_combo = ttk.Combobox(
             basic,
             textvariable=self.profile_var,
@@ -875,11 +749,11 @@ class App(tk.Tk):
             state="readonly",
             width=34,
         )
-        self.profile_combo.grid(row=1, column=1, columnspan=3, sticky="w", padx=6)
+        self.profile_combo.grid(row=0, column=1, columnspan=3, sticky="w", padx=6)
         self.profile_combo.bind("<<ComboboxSelected>>", self.apply_export_profile)
 
-        ttk.Label(basic, text="Потоки:").grid(row=1, column=4, padx=(20, 0))
-        ttk.Spinbox(basic, from_=1, to=4, textvariable=self.workers_var, width=5).grid(row=1, column=5)
+        ttk.Label(basic, text="Потоки:").grid(row=0, column=4, padx=(20, 0))
+        ttk.Spinbox(basic, from_=1, to=4, textvariable=self.workers_var, width=5).grid(row=0, column=5)
 
         ttk.Label(basic, text="Ширина:").grid(row=3, column=0, sticky="w", pady=(10, 0))
         ttk.Entry(basic, textvariable=self.width_var, width=9).grid(row=1, column=1, sticky="w", pady=(10, 0))
@@ -905,57 +779,23 @@ class App(tk.Tk):
         self._scale_row(basic, 5, "Масштаб товара", self.fill_var, 0.60, 0.94, lambda v: f"{float(v)*100:.0f}%")
         self._scale_row(basic, 6, "Сила тени", self.shadow_strength_var, 0, 80, lambda v: f"{float(v):.0f}%")
 
-        advanced = ttk.LabelFrame(left, text="3. Автоматическая обработка каждого фото", padding=12)
+        advanced = ttk.LabelFrame(left, text="3. Стабильная ручная обработка", padding=12)
         advanced.pack(fill="x", pady=(10, 0))
-
-        ttk.Checkbutton(
-            advanced,
-            text="Автонастройка отдельно для каждого фото",
-            variable=self.auto_settings_var,
-        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
 
         ttk.Checkbutton(
             advanced,
             text="Не допускать просвечивания нового фона через товар",
             variable=self.prevent_showthrough_var,
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 4))
-
-        ttk.Checkbutton(
-            advanced,
-            text="ХРОМ/ГЛЯНЕЦ — восстанавливать непрозрачность до очистки",
-            variable=self.solid_object_var,
-        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(0, 4))
-
-        self._scale_row(
-            advanced, 3, "Заполнение внутренних дыр",
-            self.solid_hole_limit_var, 1, 25, lambda v: f"{float(v):.0f}%"
-        )
-
-        ttk.Checkbutton(
-            advanced,
-            text="Строгая очистка старых логотипов и баннера (необязательно)",
-            variable=self.strict_logo_cleanup_var,
-        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 4))
-
-        ttk.Checkbutton(
-            advanced,
-            text="Удаление логотипа НА ДЕТАЛИ (экспериментально — обычно выключено)",
-            variable=self.remove_product_logo_var,
-        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 4))
-
-        self._scale_row(
-            advanced, 6, "Сила удаления логотипа на детали",
-            self.logo_remove_strength_var, 0, 100, lambda v: f"{float(v):.0f}"
-        )
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
 
         ttk.Label(
             advanced,
-            text="При включённой автонастройке программа сама выбирает масштаб, очистку и толщину края.",
-        ).grid(row=7, column=0, columnspan=5, sticky="w", pady=(0, 8))
+            text="Автонастройка и экспериментальные функции отключены в версии 4.1 Stable.",
+        ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(0, 8))
 
-        self._scale_row(advanced, 8, "Ручная очистка фона", self.cleanup_var, 0, 100, lambda v: f"{float(v):.0f}")
-        self._scale_row(advanced, 9, "Ручное расширение края", self.edge_expand_var, 0, 4, lambda v: f"{float(v):.0f} px")
-        self._scale_row(advanced, 10, "Резкость товара", self.sharpness_var, 0, 100, lambda v: f"{float(v):.0f}")
+        self._scale_row(advanced, 2, "Очистка старого фона", self.cleanup_var, 0, 100, lambda v: f"{float(v):.0f}")
+        self._scale_row(advanced, 3, "Расширение края", self.edge_expand_var, 0, 4, lambda v: f"{float(v):.0f} px")
+        self._scale_row(advanced, 4, "Резкость товара", self.sharpness_var, 0, 100, lambda v: f"{float(v):.0f}")
 
         source_bar = ttk.LabelFrame(left, text="4. Добавить фотографии", padding=10)
         source_bar.pack(fill="x", pady=(10, 0))
@@ -1025,7 +865,6 @@ class App(tk.Tk):
         self.preview_label.pack(fill="both", expand=True)
         self.preview_info = tk.StringVar(value="")
         ttk.Label(right, textvariable=self.preview_info, wraplength=420).pack(fill="x", pady=(8, 0))
-        ttk.Label(right, text=f"Версия {APP_VERSION}  •  Build {APP_BUILD}", font=("Segoe UI", 9, "bold")).pack(fill="x", pady=(8, 0))
 
     def _scale_row(self, parent, row, text, variable, frm, to, formatter):
         ttk.Label(parent, text=text + ":").grid(row=row, column=0, sticky="w", pady=6)
@@ -1145,14 +984,11 @@ class App(tk.Tk):
             edge_expand=int(round(self.edge_expand_var.get())),
             sharpness=int(self.sharpness_var.get()),
             straighten=bool(self.straighten_var.get()),
-            auto_settings=bool(self.auto_settings_var.get()),
+            auto_settings=False,
             prevent_background_showthrough=bool(self.prevent_showthrough_var.get()),
-            strict_logo_cleanup=bool(self.strict_logo_cleanup_var.get()),
-            remove_product_logo=bool(self.remove_product_logo_var.get()),
+            strict_logo_cleanup=False,
+            remove_product_logo=False,
             logo_remove_strength=int(self.logo_remove_strength_var.get()),
-            solid_object=bool(self.solid_object_var.get()),
-            solid_hole_limit=int(self.solid_hole_limit_var.get()),
-            processing_mode=self.processing_mode_var.get(),
         )
 
     def start_preview(self):
@@ -1202,7 +1038,7 @@ class App(tk.Tk):
         self.progress["maximum"] = len(files)
         self.progress["value"] = 0
         self.log.delete("1.0", "end")
-        self.write_log(f"Cheviplus Photo Studio {APP_VERSION}")
+        self.write_log(f"Cheviplus Photo Studio {APP_VERSION} / Build {APP_BUILD}")
         self.write_log(f"Фотографий: {len(files)}; потоков: {self.workers_var.get()}")
         self.write_log(
             "Автонастройка: "
@@ -1338,9 +1174,6 @@ class App(tk.Tk):
             "strict_logo_cleanup": self.strict_logo_cleanup_var.get(),
             "remove_product_logo": self.remove_product_logo_var.get(),
             "logo_remove_strength": self.logo_remove_strength_var.get(),
-            "solid_object": self.solid_object_var.get(),
-            "solid_hole_limit": self.solid_hole_limit_var.get(),
-            "processing_mode": self.processing_mode_var.get(),
             "workers": self.workers_var.get(),
         }
 
@@ -1374,18 +1207,15 @@ class App(tk.Tk):
             self.shadow_enabled.set(bool(data.get("shadow_enabled", True)))
             self.shadow_strength_var.set(int(data.get("shadow_strength", 35)))
             self.recursive_enabled.set(bool(data.get("recursive", True)))
-            self.cleanup_var.set(int(data.get("cleanup", 45)))
+            self.cleanup_var.set(int(data.get("cleanup", 82)))
             self.edge_expand_var.set(int(data.get("edge_expand", 1)))
             self.sharpness_var.set(int(data.get("sharpness", 45)))
-            self.straighten_var.set(bool(data.get("straighten", True)))
-            self.auto_settings_var.set(bool(data.get("auto_settings", True)))
+            self.straighten_var.set(bool(data.get("straighten", False)))
+            self.auto_settings_var.set(False)
             self.prevent_showthrough_var.set(bool(data.get("prevent_showthrough", True)))
-            self.strict_logo_cleanup_var.set(bool(data.get("strict_logo_cleanup", False)))
-            self.remove_product_logo_var.set(bool(data.get("remove_product_logo", False)))
+            self.strict_logo_cleanup_var.set(False)
+            self.remove_product_logo_var.set(False)
             self.logo_remove_strength_var.set(int(data.get("logo_remove_strength", 55)))
-            self.solid_object_var.set(bool(data.get("solid_object", True)))
-            self.solid_hole_limit_var.set(int(data.get("solid_hole_limit", 8)))
-            self.processing_mode_var.set(data.get("processing_mode", "Cheviplus Studio — старый фирменный баннер"))
             self.workers_var.set(int(data.get("workers", 2)))
 
             choice = data.get("background_choice", "Фон 1 — Cheviplus")
@@ -1411,17 +1241,15 @@ class App(tk.Tk):
         self.shadow_enabled.set(True)
         self.shadow_strength_var.set(35)
         self.recursive_enabled.set(True)
-        self.cleanup_var.set(45)
+        self.cleanup_var.set(82)
         self.edge_expand_var.set(1)
         self.sharpness_var.set(45)
-        self.straighten_var.set(True)
+        self.straighten_var.set(False)
         self.auto_settings_var.set(False)
         self.prevent_showthrough_var.set(True)
         self.strict_logo_cleanup_var.set(False)
         self.remove_product_logo_var.set(False)
         self.logo_remove_strength_var.set(55)
-        self.solid_object_var.set(True)
-        self.solid_hole_limit_var.set(8)
         self.workers_var.set(2)
         self.bg_choice_var.set("Фон 1 — Cheviplus")
         self.bg_var.set(str(DEFAULT_BG_1))
