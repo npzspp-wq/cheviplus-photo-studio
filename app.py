@@ -26,7 +26,7 @@ BACKGROUNDS_DIR = resource_path("assets/backgrounds")
 MODEL_DIR = resource_path("models")
 os.environ["U2NET_HOME"] = str(MODEL_DIR)
 
-APP_VERSION = "3.6"
+APP_VERSION = "3.7"
 SETTINGS_FILE = APP_DIR / "cheviplus_settings.json"
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -404,6 +404,58 @@ def add_shadow(canvas, product, pos, strength=35):
     canvas.alpha_composite(shadow, (pos[0], pos[1] + offset_y))
 
 
+def remove_product_logo_region(image: Image.Image, strength=55):
+    """Осторожно убирает небольшую наклейку в центральной зоне товара."""
+    import numpy as np
+    from scipy import ndimage
+    img=image.convert("RGBA")
+    arr=np.asarray(img).copy()
+    alpha=arr[...,3]
+    ys,xs=np.nonzero(alpha>160)
+    if len(xs)<200: return img
+    x0,x1=xs.min(),xs.max(); y0,y1=ys.min(),ys.max()
+    w=x1-x0+1; h=y1-y0+1
+    rx0=int(x0+w*0.24); rx1=int(x0+w*0.76)
+    ry0=int(y0+h*0.20); ry1=int(y0+h*0.78)
+    crop=arr[ry0:ry1,rx0:rx1,:3].astype(np.float32)
+    crop_alpha=alpha[ry0:ry1,rx0:rx1]>180
+    mx=crop.max(axis=2); mn=crop.min(axis=2); sat=mx-mn; lum=crop.mean(axis=2)
+    suspicious=crop_alpha & ((lum>150) | (sat>78))
+    suspicious=ndimage.binary_opening(suspicious,structure=np.ones((3,3)))
+    suspicious=ndimage.binary_closing(suspicious,structure=np.ones((5,5)))
+    labels,count=ndimage.label(suspicious)
+    if count==0: return img
+    sizes=np.bincount(labels.ravel()); sizes[0]=0
+    region_area=suspicious.size; candidates=[]
+    for idx in range(1,count+1):
+        size=sizes[idx]
+        if size<max(20,region_area*0.0007) or size>region_area*0.16: continue
+        yy,xx=np.nonzero(labels==idx)
+        if len(xx)==0: continue
+        bw=xx.max()-xx.min()+1; bh=yy.max()-yy.min()+1; aspect=bw/max(1,bh)
+        if 0.7<=aspect<=6.5: candidates.append((size,idx,xx.min(),xx.max(),yy.min(),yy.max()))
+    if not candidates: return img
+    _,idx,cx0,cx1,cy0,cy1=max(candidates)
+    pad=max(3,int(min(w,h)*(0.005+max(0,min(100,strength))*0.00006)))
+    cx0=max(0,cx0-pad); cx1=min(crop.shape[1]-1,cx1+pad)
+    cy0=max(0,cy0-pad); cy1=min(crop.shape[0]-1,cy1+pad)
+    gy0=max(0,cy0-pad*3); gy1=min(crop.shape[0],cy1+pad*3+1)
+    gx0=max(0,cx0-pad*3); gx1=min(crop.shape[1],cx1+pad*3+1)
+    surround=crop[gy0:gy1,gx0:gx1]
+    mask_local=np.ones(surround.shape[:2],dtype=bool)
+    mask_local[cy0-gy0:cy1-gy0+1,cx0-gx0:cx1-gx0+1]=False
+    pixels=surround[mask_local]
+    if len(pixels)<20: return img
+    base=np.median(pixels,axis=0)
+    fill=np.empty_like(crop[cy0:cy1+1,cx0:cx1+1]); fill[:]=base
+    for c in range(3):
+        local_blur=ndimage.gaussian_filter(crop[...,c],sigma=max(3,pad))
+        fill[...,c]=local_blur[cy0:cy1+1,cx0:cx1+1]*0.45+base[c]*0.55
+    crop[cy0:cy1+1,cx0:cx1+1]=np.clip(fill,0,255)
+    arr[ry0:ry1,rx0:rx1,:3]=crop.astype(np.uint8)
+    return Image.fromarray(arr,mode="RGBA")
+
+
 def compose_image(
     source,
     background_path,
@@ -421,6 +473,8 @@ def compose_image(
     auto_settings,
     prevent_background_showthrough,
     strict_logo_cleanup,
+    remove_product_logo,
+    logo_remove_strength,
 ):
     original = Image.open(source)
     product, auto_info = remove_background(
@@ -438,6 +492,9 @@ def compose_image(
 
     if straighten:
         product = trim_transparency(auto_straighten(product))
+
+    if remove_product_logo:
+        product = remove_product_logo_region(product, logo_remove_strength)
 
     sharpness = max(0, min(100, int(sharpness)))
     rgb = product.convert("RGB")
@@ -653,9 +710,11 @@ class App(tk.Tk):
         self.edge_expand_var = tk.IntVar(value=1)
         self.sharpness_var = tk.IntVar(value=45)
         self.straighten_var = tk.BooleanVar(value=True)
-        self.auto_settings_var = tk.BooleanVar(value=True)
+        self.auto_settings_var = tk.BooleanVar(value=False)
         self.prevent_showthrough_var = tk.BooleanVar(value=True)
-        self.strict_logo_cleanup_var = tk.BooleanVar(value=True)
+        self.strict_logo_cleanup_var = tk.BooleanVar(value=False)
+        self.remove_product_logo_var = tk.BooleanVar(value=False)
+        self.logo_remove_strength_var = tk.IntVar(value=55)
         self.workers_var = tk.IntVar(value=2)
 
         files_box = ttk.LabelFrame(left, text="1. Файлы и фон", padding=12)
@@ -736,18 +795,29 @@ class App(tk.Tk):
 
         ttk.Checkbutton(
             advanced,
-            text="Строгая очистка старых логотипов и баннера",
+            text="Строгая очистка старых логотипов и баннера (необязательно)",
             variable=self.strict_logo_cleanup_var,
-        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 4))
+
+        ttk.Checkbutton(
+            advanced,
+            text="Удалять старую наклейку/логотип Cheviplus на самой детали",
+            variable=self.remove_product_logo_var,
+        ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 4))
+
+        self._scale_row(
+            advanced, 4, "Сила удаления логотипа на детали",
+            self.logo_remove_strength_var, 0, 100, lambda v: f"{float(v):.0f}"
+        )
 
         ttk.Label(
             advanced,
             text="При включённой автонастройке программа сама выбирает масштаб, очистку и толщину края.",
-        ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(0, 8))
+        ).grid(row=5, column=0, columnspan=5, sticky="w", pady=(0, 8))
 
-        self._scale_row(advanced, 4, "Ручная очистка фона", self.cleanup_var, 0, 100, lambda v: f"{float(v):.0f}")
-        self._scale_row(advanced, 5, "Ручное расширение края", self.edge_expand_var, 0, 4, lambda v: f"{float(v):.0f} px")
-        self._scale_row(advanced, 6, "Резкость товара", self.sharpness_var, 0, 100, lambda v: f"{float(v):.0f}")
+        self._scale_row(advanced, 6, "Ручная очистка фона", self.cleanup_var, 0, 100, lambda v: f"{float(v):.0f}")
+        self._scale_row(advanced, 7, "Ручное расширение края", self.edge_expand_var, 0, 4, lambda v: f"{float(v):.0f} px")
+        self._scale_row(advanced, 8, "Резкость товара", self.sharpness_var, 0, 100, lambda v: f"{float(v):.0f}")
 
         source_bar = ttk.LabelFrame(left, text="4. Добавить фотографии", padding=10)
         source_bar.pack(fill="x", pady=(10, 0))
@@ -939,6 +1009,8 @@ class App(tk.Tk):
             auto_settings=bool(self.auto_settings_var.get()),
             prevent_background_showthrough=bool(self.prevent_showthrough_var.get()),
             strict_logo_cleanup=bool(self.strict_logo_cleanup_var.get()),
+            remove_product_logo=bool(self.remove_product_logo_var.get()),
+            logo_remove_strength=int(self.logo_remove_strength_var.get()),
         )
 
     def start_preview(self):
@@ -1122,6 +1194,8 @@ class App(tk.Tk):
             "auto_settings": self.auto_settings_var.get(),
             "prevent_showthrough": self.prevent_showthrough_var.get(),
             "strict_logo_cleanup": self.strict_logo_cleanup_var.get(),
+            "remove_product_logo": self.remove_product_logo_var.get(),
+            "logo_remove_strength": self.logo_remove_strength_var.get(),
             "workers": self.workers_var.get(),
         }
 
@@ -1161,7 +1235,9 @@ class App(tk.Tk):
             self.straighten_var.set(bool(data.get("straighten", True)))
             self.auto_settings_var.set(bool(data.get("auto_settings", True)))
             self.prevent_showthrough_var.set(bool(data.get("prevent_showthrough", True)))
-            self.strict_logo_cleanup_var.set(bool(data.get("strict_logo_cleanup", True)))
+            self.strict_logo_cleanup_var.set(bool(data.get("strict_logo_cleanup", False)))
+            self.remove_product_logo_var.set(bool(data.get("remove_product_logo", False)))
+            self.logo_remove_strength_var.set(int(data.get("logo_remove_strength", 55)))
             self.workers_var.set(int(data.get("workers", 2)))
 
             choice = data.get("background_choice", "Фон 1 — Cheviplus")
@@ -1191,9 +1267,11 @@ class App(tk.Tk):
         self.edge_expand_var.set(1)
         self.sharpness_var.set(45)
         self.straighten_var.set(True)
-        self.auto_settings_var.set(True)
+        self.auto_settings_var.set(False)
         self.prevent_showthrough_var.set(True)
-        self.strict_logo_cleanup_var.set(True)
+        self.strict_logo_cleanup_var.set(False)
+        self.remove_product_logo_var.set(False)
+        self.logo_remove_strength_var.set(55)
         self.workers_var.set(2)
         self.bg_choice_var.set("Фон 1 — Cheviplus")
         self.bg_var.set(str(DEFAULT_BG_1))
