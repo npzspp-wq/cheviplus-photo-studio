@@ -26,7 +26,7 @@ BACKGROUNDS_DIR = resource_path("assets/backgrounds")
 MODEL_DIR = resource_path("models")
 os.environ["U2NET_HOME"] = str(MODEL_DIR)
 
-APP_VERSION = "3.5"
+APP_VERSION = "3.6"
 SETTINGS_FILE = APP_DIR / "cheviplus_settings.json"
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -165,6 +165,54 @@ def analyze_object_shape(alpha: Image.Image):
     }
 
 
+def suppress_old_background(alpha: Image.Image, strict=True):
+    """
+    Удаляет большие полупрозрачные участки старого баннера,
+    которые rembg иногда оставляет рядом с предметом.
+    Для непрозрачных автозапчастей это безопаснее обычного размытого края.
+    """
+    if not strict:
+        return alpha
+
+    import numpy as np
+    from scipy import ndimage
+
+    arr = np.asarray(alpha, dtype=np.uint8)
+
+    # Ядро — только очень уверенные пиксели самого предмета.
+    core = arr >= 175
+    labels, count = ndimage.label(core)
+    if count:
+        sizes = np.bincount(labels.ravel())
+        sizes[0] = 0
+        main_id = int(sizes.argmax())
+        core = labels == main_id
+
+    # Немного закрываем дырочки внутри основной детали.
+    core = ndimage.binary_closing(core, structure=np.ones((3, 3)), iterations=1)
+    core = ndimage.binary_fill_holes(core)
+
+    # Разрешаем естественный полупрозрачный край только рядом с уверенным ядром.
+    support = arr >= 28
+    distance = ndimage.distance_transform_edt(~core)
+    near_core = distance <= 5.0
+    keep = support & (core | near_core)
+
+    # Отсекаем отдельные куски баннера/логотипа.
+    labels, count = ndimage.label(keep)
+    if count:
+        sizes = np.bincount(labels.ravel())
+        sizes[0] = 0
+        main_id = int(sizes.argmax())
+        keep = labels == main_id
+
+    result = np.where(keep, arr, 0).astype(np.uint8)
+    # Внутренность предмета делаем непрозрачной, край сохраняем узким.
+    result[core] = 255
+    result[result < 22] = 0
+    return Image.fromarray(result, mode="L")
+
+
 def harden_alpha(alpha: Image.Image, opacity_floor=128):
     """Не даёт новому фону просвечивать через непрозрачные части товара."""
     import numpy as np
@@ -275,6 +323,7 @@ def remove_background(
     edge_expand=1,
     auto_settings=True,
     prevent_background_showthrough=True,
+    strict_logo_cleanup=True,
 ):
     from rembg import remove
 
@@ -293,6 +342,10 @@ def remove_background(
         edge_expand = recommendations["edge_expand"]
 
     cleaned_alpha = clean_alpha_mask(raw_alpha, cleanup, edge_expand)
+    cleaned_alpha = suppress_old_background(
+        cleaned_alpha,
+        strict=strict_logo_cleanup,
+    )
     result.putalpha(cleaned_alpha)
     result = remove_isolated_artifacts(result, strength=cleanup)
 
@@ -367,6 +420,7 @@ def compose_image(
     straighten,
     auto_settings,
     prevent_background_showthrough,
+    strict_logo_cleanup,
 ):
     original = Image.open(source)
     product, auto_info = remove_background(
@@ -375,6 +429,7 @@ def compose_image(
         edge_expand=edge_expand,
         auto_settings=auto_settings,
         prevent_background_showthrough=prevent_background_showthrough,
+        strict_logo_cleanup=strict_logo_cleanup,
     )
     product = trim_transparency(product)
 
@@ -600,6 +655,7 @@ class App(tk.Tk):
         self.straighten_var = tk.BooleanVar(value=True)
         self.auto_settings_var = tk.BooleanVar(value=True)
         self.prevent_showthrough_var = tk.BooleanVar(value=True)
+        self.strict_logo_cleanup_var = tk.BooleanVar(value=True)
         self.workers_var = tk.IntVar(value=2)
 
         files_box = ttk.LabelFrame(left, text="1. Файлы и фон", padding=12)
@@ -676,16 +732,22 @@ class App(tk.Tk):
             advanced,
             text="Не допускать просвечивания нового фона через товар",
             variable=self.prevent_showthrough_var,
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 4))
+
+        ttk.Checkbutton(
+            advanced,
+            text="Строгая очистка старых логотипов и баннера",
+            variable=self.strict_logo_cleanup_var,
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 8))
 
         ttk.Label(
             advanced,
             text="При включённой автонастройке программа сама выбирает масштаб, очистку и толщину края.",
-        ).grid(row=2, column=0, columnspan=5, sticky="w", pady=(0, 8))
+        ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(0, 8))
 
-        self._scale_row(advanced, 3, "Ручная очистка фона", self.cleanup_var, 0, 100, lambda v: f"{float(v):.0f}")
-        self._scale_row(advanced, 4, "Ручное расширение края", self.edge_expand_var, 0, 4, lambda v: f"{float(v):.0f} px")
-        self._scale_row(advanced, 5, "Резкость товара", self.sharpness_var, 0, 100, lambda v: f"{float(v):.0f}")
+        self._scale_row(advanced, 4, "Ручная очистка фона", self.cleanup_var, 0, 100, lambda v: f"{float(v):.0f}")
+        self._scale_row(advanced, 5, "Ручное расширение края", self.edge_expand_var, 0, 4, lambda v: f"{float(v):.0f} px")
+        self._scale_row(advanced, 6, "Резкость товара", self.sharpness_var, 0, 100, lambda v: f"{float(v):.0f}")
 
         source_bar = ttk.LabelFrame(left, text="4. Добавить фотографии", padding=10)
         source_bar.pack(fill="x", pady=(10, 0))
@@ -876,6 +938,7 @@ class App(tk.Tk):
             straighten=bool(self.straighten_var.get()),
             auto_settings=bool(self.auto_settings_var.get()),
             prevent_background_showthrough=bool(self.prevent_showthrough_var.get()),
+            strict_logo_cleanup=bool(self.strict_logo_cleanup_var.get()),
         )
 
     def start_preview(self):
@@ -932,6 +995,8 @@ class App(tk.Tk):
             + ("включена" if self.auto_settings_var.get() else "выключена")
             + "; защита от просвечивания: "
             + ("включена" if self.prevent_showthrough_var.get() else "выключена")
+            + "; строгая очистка старого логотипа: "
+            + ("включена" if self.strict_logo_cleanup_var.get() else "выключена")
         )
         threading.Thread(target=self.batch_worker, args=(files,), daemon=True).start()
 
@@ -1056,6 +1121,7 @@ class App(tk.Tk):
             "straighten": self.straighten_var.get(),
             "auto_settings": self.auto_settings_var.get(),
             "prevent_showthrough": self.prevent_showthrough_var.get(),
+            "strict_logo_cleanup": self.strict_logo_cleanup_var.get(),
             "workers": self.workers_var.get(),
         }
 
@@ -1095,6 +1161,7 @@ class App(tk.Tk):
             self.straighten_var.set(bool(data.get("straighten", True)))
             self.auto_settings_var.set(bool(data.get("auto_settings", True)))
             self.prevent_showthrough_var.set(bool(data.get("prevent_showthrough", True)))
+            self.strict_logo_cleanup_var.set(bool(data.get("strict_logo_cleanup", True)))
             self.workers_var.set(int(data.get("workers", 2)))
 
             choice = data.get("background_choice", "Фон 1 — Cheviplus")
@@ -1126,6 +1193,7 @@ class App(tk.Tk):
         self.straighten_var.set(True)
         self.auto_settings_var.set(True)
         self.prevent_showthrough_var.set(True)
+        self.strict_logo_cleanup_var.set(True)
         self.workers_var.set(2)
         self.bg_choice_var.set("Фон 1 — Cheviplus")
         self.bg_var.set(str(DEFAULT_BG_1))
