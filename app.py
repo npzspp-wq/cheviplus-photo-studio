@@ -26,7 +26,7 @@ BACKGROUNDS_DIR = resource_path("assets/backgrounds")
 MODEL_DIR = resource_path("models")
 os.environ["U2NET_HOME"] = str(MODEL_DIR)
 
-APP_VERSION = "3.7"
+APP_VERSION = "3.8"
 SETTINGS_FILE = APP_DIR / "cheviplus_settings.json"
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -456,6 +456,47 @@ def remove_product_logo_region(image: Image.Image, strength=55):
     return Image.fromarray(arr,mode="RGBA")
 
 
+
+def reinforce_solid_object_alpha(alpha: Image.Image, hole_limit_percent=8):
+    import numpy as np
+    from scipy import ndimage
+
+    arr = np.asarray(alpha, dtype=np.uint8)
+    base = arr >= 70
+    labels, count = ndimage.label(base)
+    if count == 0:
+        return alpha
+
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    main_id = int(sizes.argmax())
+    main = labels == main_id
+    main_size = max(1, int(sizes[main_id]))
+
+    closed = ndimage.binary_closing(main, structure=np.ones((5, 5)), iterations=1)
+    filled = ndimage.binary_fill_holes(closed)
+    holes = filled & ~closed
+
+    hole_labels, hole_count = ndimage.label(holes)
+    fill_small = np.zeros_like(holes, dtype=bool)
+    max_hole = main_size * max(1, min(25, int(hole_limit_percent))) / 100.0
+
+    if hole_count:
+        hs = np.bincount(hole_labels.ravel())
+        hs[0] = 0
+        for i in range(1, hole_count + 1):
+            if 0 < hs[i] <= max_hole:
+                fill_small |= (hole_labels == i)
+
+    result = arr.copy()
+    # Делает внутренние части товара непрозрачными, но сохраняет внешний край.
+    inside = ndimage.binary_erosion(main | fill_small, structure=np.ones((3, 3)), iterations=1)
+    result[inside] = 255
+    result[fill_small] = 255
+    result[result < 18] = 0
+    return Image.fromarray(result.astype(np.uint8), mode="L")
+
+
 def compose_image(
     source,
     background_path,
@@ -475,6 +516,8 @@ def compose_image(
     strict_logo_cleanup,
     remove_product_logo,
     logo_remove_strength,
+    solid_object,
+    solid_hole_limit,
 ):
     original = Image.open(source)
     product, auto_info = remove_background(
@@ -485,6 +528,13 @@ def compose_image(
         prevent_background_showthrough=prevent_background_showthrough,
         strict_logo_cleanup=strict_logo_cleanup,
     )
+    if solid_object:
+        product.putalpha(
+            reinforce_solid_object_alpha(
+                product.getchannel("A"),
+                hole_limit_percent=solid_hole_limit,
+            )
+        )
     product = trim_transparency(product)
 
     if auto_settings:
@@ -715,6 +765,8 @@ class App(tk.Tk):
         self.strict_logo_cleanup_var = tk.BooleanVar(value=False)
         self.remove_product_logo_var = tk.BooleanVar(value=False)
         self.logo_remove_strength_var = tk.IntVar(value=55)
+        self.solid_object_var = tk.BooleanVar(value=True)
+        self.solid_hole_limit_var = tk.IntVar(value=8)
         self.workers_var = tk.IntVar(value=2)
 
         files_box = ttk.LabelFrame(left, text="1. Файлы и фон", padding=12)
@@ -795,6 +847,17 @@ class App(tk.Tk):
 
         ttk.Checkbutton(
             advanced,
+            text="Непрозрачный товар — для хрома, глянца и чёрного пластика",
+            variable=self.solid_object_var,
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(0, 4))
+
+        self._scale_row(
+            advanced, 3, "Заполнение внутренних дыр",
+            self.solid_hole_limit_var, 1, 25, lambda v: f"{float(v):.0f}%"
+        )
+
+        ttk.Checkbutton(
+            advanced,
             text="Строгая очистка старых логотипов и баннера (необязательно)",
             variable=self.strict_logo_cleanup_var,
         ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 4))
@@ -806,18 +869,18 @@ class App(tk.Tk):
         ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 4))
 
         self._scale_row(
-            advanced, 4, "Сила удаления логотипа на детали",
+            advanced, 6, "Сила удаления логотипа на детали",
             self.logo_remove_strength_var, 0, 100, lambda v: f"{float(v):.0f}"
         )
 
         ttk.Label(
             advanced,
             text="При включённой автонастройке программа сама выбирает масштаб, очистку и толщину края.",
-        ).grid(row=5, column=0, columnspan=5, sticky="w", pady=(0, 8))
+        ).grid(row=7, column=0, columnspan=5, sticky="w", pady=(0, 8))
 
-        self._scale_row(advanced, 6, "Ручная очистка фона", self.cleanup_var, 0, 100, lambda v: f"{float(v):.0f}")
-        self._scale_row(advanced, 7, "Ручное расширение края", self.edge_expand_var, 0, 4, lambda v: f"{float(v):.0f} px")
-        self._scale_row(advanced, 8, "Резкость товара", self.sharpness_var, 0, 100, lambda v: f"{float(v):.0f}")
+        self._scale_row(advanced, 8, "Ручная очистка фона", self.cleanup_var, 0, 100, lambda v: f"{float(v):.0f}")
+        self._scale_row(advanced, 9, "Ручное расширение края", self.edge_expand_var, 0, 4, lambda v: f"{float(v):.0f} px")
+        self._scale_row(advanced, 10, "Резкость товара", self.sharpness_var, 0, 100, lambda v: f"{float(v):.0f}")
 
         source_bar = ttk.LabelFrame(left, text="4. Добавить фотографии", padding=10)
         source_bar.pack(fill="x", pady=(10, 0))
@@ -1011,6 +1074,8 @@ class App(tk.Tk):
             strict_logo_cleanup=bool(self.strict_logo_cleanup_var.get()),
             remove_product_logo=bool(self.remove_product_logo_var.get()),
             logo_remove_strength=int(self.logo_remove_strength_var.get()),
+            solid_object=bool(self.solid_object_var.get()),
+            solid_hole_limit=int(self.solid_hole_limit_var.get()),
         )
 
     def start_preview(self):
@@ -1196,6 +1261,8 @@ class App(tk.Tk):
             "strict_logo_cleanup": self.strict_logo_cleanup_var.get(),
             "remove_product_logo": self.remove_product_logo_var.get(),
             "logo_remove_strength": self.logo_remove_strength_var.get(),
+            "solid_object": self.solid_object_var.get(),
+            "solid_hole_limit": self.solid_hole_limit_var.get(),
             "workers": self.workers_var.get(),
         }
 
@@ -1238,6 +1305,8 @@ class App(tk.Tk):
             self.strict_logo_cleanup_var.set(bool(data.get("strict_logo_cleanup", False)))
             self.remove_product_logo_var.set(bool(data.get("remove_product_logo", False)))
             self.logo_remove_strength_var.set(int(data.get("logo_remove_strength", 55)))
+            self.solid_object_var.set(bool(data.get("solid_object", True)))
+            self.solid_hole_limit_var.set(int(data.get("solid_hole_limit", 8)))
             self.workers_var.set(int(data.get("workers", 2)))
 
             choice = data.get("background_choice", "Фон 1 — Cheviplus")
@@ -1272,6 +1341,8 @@ class App(tk.Tk):
         self.strict_logo_cleanup_var.set(False)
         self.remove_product_logo_var.set(False)
         self.logo_remove_strength_var.set(55)
+        self.solid_object_var.set(True)
+        self.solid_hole_limit_var.set(8)
         self.workers_var.set(2)
         self.bg_choice_var.set("Фон 1 — Cheviplus")
         self.bg_var.set(str(DEFAULT_BG_1))
