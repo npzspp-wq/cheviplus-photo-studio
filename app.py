@@ -26,7 +26,8 @@ BACKGROUNDS_DIR = resource_path("assets/backgrounds")
 MODEL_DIR = resource_path("models")
 os.environ["U2NET_HOME"] = str(MODEL_DIR)
 
-APP_VERSION = "3.9"
+APP_VERSION = "4.0"
+APP_BUILD = "2026.08.07.01"
 SETTINGS_FILE = APP_DIR / "cheviplus_settings.json"
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -504,6 +505,59 @@ def reinforce_solid_object_alpha(alpha: Image.Image, hole_limit_percent=8):
     return Image.fromarray(result.astype(np.uint8), mode="L")
 
 
+
+def cheviplus_banner_mask(original: Image.Image, alpha: Image.Image):
+    import numpy as np
+    from scipy import ndimage
+
+    rgb = np.asarray(original.convert("RGB"), dtype=np.float32)
+    a = np.asarray(alpha, dtype=np.uint8)
+    h, w, _ = rgb.shape
+
+    # Оцениваем цвет фирменного баннера по внешней рамке снимка.
+    b = max(8, int(min(h, w) * 0.05))
+    border = np.concatenate([
+        rgb[:b].reshape(-1, 3),
+        rgb[-b:].reshape(-1, 3),
+        rgb[:, :b].reshape(-1, 3),
+        rgb[:, -b:].reshape(-1, 3),
+    ])
+    bg = np.median(border, axis=0)
+
+    # Совмещаем rembg с отличием от баннера.
+    diff = np.linalg.norm(rgb - bg[None, None, :], axis=2)
+    seed = (a >= 35) | (diff >= 28)
+
+    seed = ndimage.binary_opening(seed, np.ones((3, 3)))
+    seed = ndimage.binary_closing(seed, np.ones((7, 7)), iterations=2)
+
+    labels, count = ndimage.label(seed)
+    if count:
+        sizes = np.bincount(labels.ravel())
+        sizes[0] = 0
+        seed = labels == int(sizes.argmax())
+
+    # Хром/глянец: небольшие внутренние "дыры" закрываем.
+    filled = ndimage.binary_fill_holes(seed)
+    holes = filled & ~seed
+    hole_labels, hole_count = ndimage.label(holes)
+    if hole_count:
+        sizes = np.bincount(hole_labels.ravel())
+        sizes[0] = 0
+        max_hole = max(1, int(seed.sum() * 0.12))
+        for i in range(1, hole_count + 1):
+            if sizes[i] <= max_hole:
+                seed |= (hole_labels == i)
+
+    eroded = ndimage.binary_erosion(seed, np.ones((3, 3)), iterations=1)
+    edge = seed & ~eroded
+
+    out = np.zeros_like(a)
+    out[eroded] = 255
+    out[edge] = np.maximum(a[edge], 185)
+    return Image.fromarray(out.astype(np.uint8), mode="L")
+
+
 def compose_image(
     source,
     background_path,
@@ -525,6 +579,7 @@ def compose_image(
     logo_remove_strength,
     solid_object,
     solid_hole_limit,
+    processing_mode,
 ):
     original = Image.open(source)
     product, auto_info = remove_background(
@@ -537,6 +592,10 @@ def compose_image(
         solid_object=solid_object,
         solid_hole_limit=solid_hole_limit,
     )
+    if processing_mode.startswith("Cheviplus Studio"):
+        product.putalpha(
+            cheviplus_banner_mask(original, product.getchannel("A"))
+        )
     product = trim_transparency(product)
 
     if auto_settings:
@@ -661,7 +720,7 @@ def save_result(
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(f"Cheviplus Photo Studio {APP_VERSION}")
+        self.title(f"Cheviplus Photo Studio {APP_VERSION} — Build {APP_BUILD}")
         self.geometry("1280x820")
         self.minsize(980, 640)
         try:
@@ -705,7 +764,7 @@ class App(tk.Tk):
         ).pack(side="left", padx=24, pady=18)
         tk.Label(
             header,
-            text="Профессиональная пакетная подготовка фотографий",
+            text=f"Build {APP_BUILD}  •  Профессиональная пакетная подготовка фотографий",
             font=("Segoe UI", 10),
             fg="#cfd5db",
             bg="#20252b",
@@ -769,6 +828,7 @@ class App(tk.Tk):
         self.logo_remove_strength_var = tk.IntVar(value=55)
         self.solid_object_var = tk.BooleanVar(value=True)
         self.solid_hole_limit_var = tk.IntVar(value=8)
+        self.processing_mode_var = tk.StringVar(value="Cheviplus Studio — старый фирменный баннер")
         self.workers_var = tk.IntVar(value=2)
 
         files_box = ttk.LabelFrame(left, text="1. Файлы и фон", padding=12)
@@ -794,7 +854,20 @@ class App(tk.Tk):
 
         basic = ttk.LabelFrame(left, text="2. Основные настройки", padding=12)
         basic.pack(fill="x", pady=(10, 0))
-        ttk.Label(basic, text="Профиль экспорта:").grid(row=0, column=0, sticky="w")
+        ttk.Label(basic, text="Режим обработки:").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(
+            basic,
+            textvariable=self.processing_mode_var,
+            values=(
+                "Cheviplus Studio — старый фирменный баннер",
+                "Хром / глянец",
+                "Обычный",
+            ),
+            state="readonly",
+            width=38,
+        ).grid(row=0, column=1, columnspan=3, sticky="w", padx=6, pady=(0, 8))
+
+        ttk.Label(basic, text="Профиль экспорта:").grid(row=1, column=0, sticky="w")
         self.profile_combo = ttk.Combobox(
             basic,
             textvariable=self.profile_var,
@@ -802,11 +875,11 @@ class App(tk.Tk):
             state="readonly",
             width=34,
         )
-        self.profile_combo.grid(row=0, column=1, columnspan=3, sticky="w", padx=6)
+        self.profile_combo.grid(row=1, column=1, columnspan=3, sticky="w", padx=6)
         self.profile_combo.bind("<<ComboboxSelected>>", self.apply_export_profile)
 
-        ttk.Label(basic, text="Потоки:").grid(row=0, column=4, padx=(20, 0))
-        ttk.Spinbox(basic, from_=1, to=4, textvariable=self.workers_var, width=5).grid(row=0, column=5)
+        ttk.Label(basic, text="Потоки:").grid(row=1, column=4, padx=(20, 0))
+        ttk.Spinbox(basic, from_=1, to=4, textvariable=self.workers_var, width=5).grid(row=1, column=5)
 
         ttk.Label(basic, text="Ширина:").grid(row=3, column=0, sticky="w", pady=(10, 0))
         ttk.Entry(basic, textvariable=self.width_var, width=9).grid(row=1, column=1, sticky="w", pady=(10, 0))
@@ -866,7 +939,7 @@ class App(tk.Tk):
 
         ttk.Checkbutton(
             advanced,
-            text="Удалять старую наклейку/логотип Cheviplus на самой детали",
+            text="Удаление логотипа НА ДЕТАЛИ (экспериментально — обычно выключено)",
             variable=self.remove_product_logo_var,
         ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 4))
 
@@ -952,6 +1025,7 @@ class App(tk.Tk):
         self.preview_label.pack(fill="both", expand=True)
         self.preview_info = tk.StringVar(value="")
         ttk.Label(right, textvariable=self.preview_info, wraplength=420).pack(fill="x", pady=(8, 0))
+        ttk.Label(right, text=f"Версия {APP_VERSION}  •  Build {APP_BUILD}", font=("Segoe UI", 9, "bold")).pack(fill="x", pady=(8, 0))
 
     def _scale_row(self, parent, row, text, variable, frm, to, formatter):
         ttk.Label(parent, text=text + ":").grid(row=row, column=0, sticky="w", pady=6)
@@ -1078,6 +1152,7 @@ class App(tk.Tk):
             logo_remove_strength=int(self.logo_remove_strength_var.get()),
             solid_object=bool(self.solid_object_var.get()),
             solid_hole_limit=int(self.solid_hole_limit_var.get()),
+            processing_mode=self.processing_mode_var.get(),
         )
 
     def start_preview(self):
@@ -1265,6 +1340,7 @@ class App(tk.Tk):
             "logo_remove_strength": self.logo_remove_strength_var.get(),
             "solid_object": self.solid_object_var.get(),
             "solid_hole_limit": self.solid_hole_limit_var.get(),
+            "processing_mode": self.processing_mode_var.get(),
             "workers": self.workers_var.get(),
         }
 
@@ -1309,6 +1385,7 @@ class App(tk.Tk):
             self.logo_remove_strength_var.set(int(data.get("logo_remove_strength", 55)))
             self.solid_object_var.set(bool(data.get("solid_object", True)))
             self.solid_hole_limit_var.set(int(data.get("solid_hole_limit", 8)))
+            self.processing_mode_var.set(data.get("processing_mode", "Cheviplus Studio — старый фирменный баннер"))
             self.workers_var.set(int(data.get("workers", 2)))
 
             choice = data.get("background_choice", "Фон 1 — Cheviplus")
