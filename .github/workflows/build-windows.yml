@@ -27,7 +27,7 @@ jobs:
 
       - name: Run compile and stability checks
         run: |
-          python -m compileall app.py
+          python -m compileall app.py launcher.py cheviplus_stability_patch.py cheviplus_product_cutout.py cheviplus_backdrop_quality.py
           python tools/audit_static.py
           python -m unittest discover -s tests -p "test_*.py"
 
