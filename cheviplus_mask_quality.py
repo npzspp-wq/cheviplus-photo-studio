@@ -1,9 +1,10 @@
 """Mask-quality improvements for Cheviplus Photo Studio 4.2.
 
-Targets two real-world failure modes seen in production photos:
+Targets real-world failure modes seen in production photos:
 1) chrome / glossy surfaces incorrectly becoming transparent because rembg
    interprets reflections of the old backdrop as background;
-2) large pieces of the old light backdrop being kept as part of the product.
+2) large pieces of the old light backdrop being kept as part of the product;
+3) long bumper/trim parts being over-cleaned by backdrop removal.
 
 The patch is intentionally conservative and is applied on top of the existing
 stability layer. It does not enable product-logo removal or aggressive cleanup.
@@ -17,7 +18,7 @@ import app
 
 
 APP_VERSION = "4.2"
-APP_BUILD = "2026.08.10.02"
+APP_BUILD = "2026.08.10.03"
 
 
 def _border_statistics(rgb):
@@ -39,15 +40,33 @@ def _border_statistics(rgb):
     return median.astype(np.float32), np.maximum(mad, 6.0).astype(np.float32)
 
 
-def remove_border_connected_backdrop(original: Image.Image, alpha: Image.Image) -> Image.Image:
-    """Remove old light backdrop only when it is connected to the image border.
+def _alpha_geometry(alpha):
+    import numpy as np
 
-    This targets large rectangular leftovers such as backdrop paper behind a floor
-    mat. It deliberately avoids deleting isolated light areas inside the product.
-    """
+    a = np.asarray(alpha, dtype=np.uint8)
+    ys, xs = np.nonzero(a >= 90)
+    if not len(xs):
+        return 1.0, 0.0
+    bw = int(xs.max() - xs.min() + 1)
+    bh = int(ys.max() - ys.min() + 1)
+    aspect = max(bw / max(1, bh), bh / max(1, bw))
+    bbox_area = max(1, bw * bh)
+    occupancy = float((a >= 90).sum()) / float(bbox_area)
+    return aspect, occupancy
+
+
+def remove_border_connected_backdrop(original: Image.Image, alpha: Image.Image) -> Image.Image:
+    """Remove border-connected pale old backdrop without damaging long trim parts."""
 
     import numpy as np
     from scipy import ndimage
+
+    # Long, shallow parts (bumpers, mouldings, rails, pipes) are a known danger case:
+    # chrome/highlights can connect visually to the pale backdrop. For these, do not
+    # run the broad backdrop eraser; chrome recovery and normal alpha cleanup are safer.
+    aspect, occupancy = _alpha_geometry(alpha)
+    if aspect >= 2.35 and occupancy <= 0.62:
+        return alpha
 
     rgb = np.asarray(original.convert("RGB"), dtype=np.float32)
     a = np.asarray(alpha, dtype=np.uint8).copy()
@@ -59,10 +78,6 @@ def remove_border_connected_backdrop(original: Image.Image, alpha: Image.Image) 
     lum = rgb.mean(axis=2)
     chroma = rgb.max(axis=2) - rgb.min(axis=2)
     bg_like = (distance <= 5.8) | ((lum >= 185) & (chroma <= 48))
-
-    # Important: preserve border-connected pixels during closing. scipy's default
-    # border_value=0 erodes the outermost pixels, which made the component look
-    # detached from the image edge and defeated this cleanup entirely.
     bg_like = ndimage.binary_closing(
         bg_like,
         structure=np.ones((5, 5)),
@@ -92,14 +107,7 @@ def remove_border_connected_backdrop(original: Image.Image, alpha: Image.Image) 
 
 
 def recover_reflective_chrome(original: Image.Image, alpha: Image.Image) -> Image.Image:
-    """Recover enclosed reflective regions that rembg mistook for holes.
-
-    A real hole usually shows the actual studio backdrop and therefore resembles the
-    sampled image border. Chrome reflects the environment but is typically darker,
-    higher-contrast, or more chromatic than the direct backdrop. We only restore
-    enclosed candidates inside a strong product silhouette and reject candidates
-    whose appearance is too similar to the real backdrop.
-    """
+    """Recover enclosed reflective regions that rembg mistook for holes."""
 
     import numpy as np
     from scipy import ndimage
@@ -129,9 +137,8 @@ def recover_reflective_chrome(original: Image.Image, alpha: Image.Image) -> Imag
     luminance = rgb.mean(axis=2)
     chroma = rgb.max(axis=2) - rgb.min(axis=2)
 
-    gray = luminance
-    gx = ndimage.sobel(gray, axis=1)
-    gy = ndimage.sobel(gray, axis=0)
+    gx = ndimage.sobel(luminance, axis=1)
+    gy = ndimage.sobel(luminance, axis=0)
     gradient = np.hypot(gx, gy)
 
     sizes = np.bincount(labels.ravel())
@@ -148,7 +155,6 @@ def recover_reflective_chrome(original: Image.Image, alpha: Image.Image) -> Imag
         ys, xs = np.nonzero(component)
         if not len(xs):
             continue
-
         if xs.min() <= 1 or ys.min() <= 1 or xs.max() >= w - 2 or ys.max() >= h - 2:
             continue
 
@@ -199,8 +205,10 @@ def remove_background(
     raw_alpha = result.getchannel("A")
     recommendations = app.analyze_object_shape(raw_alpha)
 
-    raw_alpha = remove_border_connected_backdrop(img, raw_alpha)
+    # Recover reflective product areas first. Then apply backdrop cleanup only when
+    # geometry says the object is not a long/shallow trim-like part.
     raw_alpha = recover_reflective_chrome(img, raw_alpha)
+    raw_alpha = remove_border_connected_backdrop(img, raw_alpha)
 
     if auto_settings:
         cleanup = recommendations["cleanup"]
