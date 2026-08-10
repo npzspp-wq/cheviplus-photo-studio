@@ -11,7 +11,6 @@ class MaskQualityTests(unittest.TestCase):
         h, w = 120, 240
         rgb = np.full((h, w, 3), 235, dtype=np.uint8)
         rgb[35:85, 35:205] = (35, 38, 42)
-        # reflective chrome stripe: visually different from white backdrop
         for x in range(95, 145):
             shade = 70 + ((x - 95) % 20) * 4
             rgb[48:72, x] = (shade, shade + 10, shade + 15)
@@ -32,7 +31,6 @@ class MaskQualityTests(unittest.TestCase):
         h, w = 120, 240
         rgb = np.full((h, w, 3), 235, dtype=np.uint8)
         rgb[30:90, 30:210] = (45, 45, 48)
-        # Real opening shows the same pale backdrop as the image border.
         rgb[48:72, 95:145] = (235, 235, 235)
 
         alpha = np.zeros((h, w), dtype=np.uint8)
@@ -51,7 +49,6 @@ class MaskQualityTests(unittest.TestCase):
         h, w = 120, 200
         rgb = np.full((h, w, 3), 238, dtype=np.uint8)
         rgb[35:95, 20:110] = (40, 42, 45)
-        # Simulate a pale rectangular old-backdrop remnant touching right border.
         rgb[30:100, 115:200] = (232, 231, 228)
 
         alpha = np.zeros((h, w), dtype=np.uint8)
@@ -66,6 +63,25 @@ class MaskQualityTests(unittest.TestCase):
         )
         self.assertGreater(float(cleaned[45:85, 35:95].mean()), 200.0)
         self.assertLess(float(cleaned[40:90, 135:190].mean()), 30.0)
+
+    def test_does_not_overclean_long_bumper_like_part(self):
+        h, w = 160, 360
+        rgb = np.full((h, w, 3), 235, dtype=np.uint8)
+        rgb[65:100, 25:335] = (48, 50, 52)
+        rgb[72:90, 65:300] = (205, 205, 205)
+
+        alpha = np.zeros((h, w), dtype=np.uint8)
+        alpha[65:100, 25:335] = 255
+
+        before = alpha.copy()
+        cleaned = np.asarray(
+            mq.remove_border_connected_backdrop(
+                Image.fromarray(rgb, mode="RGB"),
+                Image.fromarray(alpha, mode="L"),
+            )
+        )
+        self.assertGreater(float(cleaned[70:95, 40:320].mean()), 240.0)
+        self.assertEqual(int(cleaned.sum()), int(before.sum()))
 
 
 if __name__ == "__main__":
