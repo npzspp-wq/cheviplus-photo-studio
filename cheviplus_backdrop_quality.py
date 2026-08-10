@@ -1,10 +1,10 @@
-"""Cheviplus Photo Studio 4.7: improve old-backdrop removal without sacrificing product parts.
+"""Cheviplus Photo Studio 4.8: product-preserving segmentation for large kits.
 
-This layer builds on the 4.6 product-first cutout. The main change is that the two
-u2netp passes are no longer collapsed immediately with a simple maximum. Pixels that
-look like the photographed backdrop and are connected to the outer frame can now be
-removed even when one pass falsely calls them foreground, while pixels supported by
-both model passes are protected.
+Real product photos can contain several overlapping floor mats occupying most of the
+frame. In that situation an edge-connected colour cleanup is unsafe: the product itself
+touches the image edge and can resemble the pale studio backdrop. 4.8 therefore treats
+AI segmentation as the authority for product geometry and uses colour only on pixels
+that BOTH segmentation passes already consider weak background.
 """
 
 from __future__ import annotations
@@ -14,112 +14,89 @@ from PIL import Image
 import app
 import cheviplus_product_cutout as pc
 
-APP_VERSION = "4.7"
+APP_VERSION = "4.8"
 APP_BUILD = "2026.08.10.01"
 
 
-def _agreement_backdrop_cleanup(original: Image.Image, alpha_original, alpha_enhanced):
-    """Remove edge-connected photographed backdrop using two-pass agreement.
-
-    Product preservation rules:
-    - strong agreement from both segmentation passes is never erased;
-    - only regions visually compatible with the sampled frame background are eligible;
-    - eligibility must be connected to an outer image edge;
-    - textured/contrasty regions receive additional protection.
-    """
+def _product_preserving_merge(alpha_original, alpha_enhanced):
+    """Merge two masks without deleting real pieces from a large/overlapping kit."""
     import numpy as np
     from scipy import ndimage
 
     a1 = np.asarray(alpha_original, dtype=np.uint8)
     a2 = np.asarray(alpha_enhanced, dtype=np.uint8)
-    combined = np.maximum(a1, a2).astype(np.uint8)
-    agreement = np.minimum(a1, a2).astype(np.uint8)
+    hi = np.maximum(a1, a2)
+    lo = np.minimum(a1, a2)
 
+    # One confident pass is enough to keep a possible product pixel. This is crucial
+    # for beige/grey mats, chrome and narrow disconnected pieces.
+    keep = hi >= 72
+
+    # Recover weak bridges between overlapping parts, but only next to already strong
+    # foreground. This avoids breaking a set into several missing pieces.
+    strong = hi >= 150
+    near_strong = ndimage.binary_dilation(strong, iterations=3)
+    keep |= near_strong & (hi >= 34)
+
+    merged = hi.copy()
+    merged[~keep] = 0
+
+    # Where both passes agree, trust the agreement and make product interiors opaque.
+    agreed = lo >= 96
+    merged[agreed] = 255
+    return merged.astype(np.uint8)
+
+
+def _safe_background_cleanup(original: Image.Image, alpha_array):
+    """Clean only AI-weak background; never infer product deletion from colour alone."""
+    import numpy as np
+    from scipy import ndimage
+
+    a = alpha_array.copy()
     rgb = np.asarray(original.convert("RGB"), dtype=np.float32)
     h, w, _ = rgb.shape
-    b = max(6, int(min(h, w) * 0.04))
-    border = np.concatenate(
-        [
-            rgb[:b].reshape(-1, 3),
-            rgb[-b:].reshape(-1, 3),
-            rgb[:, :b].reshape(-1, 3),
-            rgb[:, -b:].reshape(-1, 3),
-        ],
-        axis=0,
-    )
+    b = max(5, int(min(h, w) * 0.025))
+    border = np.concatenate([
+        rgb[:b].reshape(-1, 3), rgb[-b:].reshape(-1, 3),
+        rgb[:, :b].reshape(-1, 3), rgb[:, -b:].reshape(-1, 3)
+    ])
     bg = np.median(border, axis=0)
-    mad = np.maximum(np.median(np.abs(border - bg), axis=0), 7.0)
+    mad = np.maximum(np.median(np.abs(border - bg), axis=0), 9.0)
     distance = np.sqrt(np.sum(((rgb - bg) / mad) ** 2, axis=2))
-    lum = rgb.mean(axis=2)
-    chroma = rgb.max(axis=2) - rgb.min(axis=2)
 
-    gx = ndimage.sobel(lum, axis=1)
-    gy = ndimage.sobel(lum, axis=0)
-    gradient = np.hypot(gx, gy)
+    # Critical safety rule: colour similarity may erase ONLY pixels whose merged AI
+    # confidence is already very low. A mat touching the frame cannot be removed just
+    # because its colour resembles the backdrop.
+    candidate = (distance <= 4.2) & (a < 58)
+    labels, count = ndimage.label(candidate)
+    if count:
+        ids = set(np.unique(labels[0]).tolist()) | set(np.unique(labels[-1]).tolist())
+        ids |= set(np.unique(labels[:, 0]).tolist()) | set(np.unique(labels[:, -1]).tolist())
+        ids.discard(0)
+        if ids:
+            a[np.isin(labels, list(ids))] = 0
 
-    # Candidate background is intentionally broad, but still must be connected to
-    # the border before it can be removed.
-    bg_like = (distance <= 5.4) | ((lum >= 188) & (chroma <= 46))
-    bg_like = ndimage.binary_closing(
-        bg_like,
-        structure=np.ones((3, 3), dtype=bool),
-        iterations=1,
-        border_value=1,
-    )
-    labels, count = ndimage.label(bg_like)
-    if not count:
-        return combined
-
-    border_ids = set(np.unique(labels[0, :]).tolist())
-    border_ids.update(np.unique(labels[-1, :]).tolist())
-    border_ids.update(np.unique(labels[:, 0]).tolist())
-    border_ids.update(np.unique(labels[:, -1]).tolist())
-    border_ids.discard(0)
-    if not border_ids:
-        return combined
-
-    exterior = np.isin(labels, list(border_ids))
-
-    # Both passes agreeing strongly is the most important product-preservation guard.
-    strongly_agreed_product = agreement >= 158
-
-    # If only one pass sees foreground, allow removal when the region is visually
-    # smooth/background-like. This targets the large rectangular old-backdrop residue
-    # seen in real carpet photos.
-    weak_disagreement = agreement < 118
-    smooth = gradient < 32.0
-    obvious_low_confidence = combined < 148
-
-    erase = exterior & ~strongly_agreed_product & (
-        obvious_low_confidence | (weak_disagreement & smooth)
-    )
-
-    cleaned = combined.copy()
-    cleaned[erase] = 0
-
-    # Feather only the outer transition of removed backdrop. Never blur/fill holes.
-    removed_edge = ndimage.binary_dilation(erase, iterations=1) & ~erase
-    soft = removed_edge & (cleaned < 120) & ~strongly_agreed_product
-    cleaned[soft] = np.minimum(cleaned[soft], 72)
-    return cleaned
+    a[a < 20] = 0
+    return a
 
 
 def build_product_mask(original: Image.Image) -> Image.Image:
-    """Create a 4.7 product mask with agreement-aware backdrop cleanup."""
     import numpy as np
 
     alpha_original = np.asarray(pc._segment_alpha(original), dtype=np.uint8)
-    alpha_enhanced = np.asarray(
-        pc._segment_alpha(pc._enhanced_model_input(original)), dtype=np.uint8
-    )
+    alpha_enhanced = np.asarray(pc._segment_alpha(pc._enhanced_model_input(original)), dtype=np.uint8)
 
-    combined = _agreement_backdrop_cleanup(original, alpha_original, alpha_enhanced)
+    combined = _product_preserving_merge(alpha_original, alpha_enhanced)
+    combined = _safe_background_cleanup(original, combined)
+
+    # Do NOT use 4.6 edge-connected backdrop deletion here: real floor mats frequently
+    # touch the frame. Keep every meaningful disconnected component of the kit.
     support = pc._meaningful_component_mask(combined)
     combined = np.where(support, combined, 0).astype(np.uint8)
-
-    # Keep the conservative 4.6 cleanup as a second pass for genuinely weak residue.
-    combined = pc._remove_edge_connected_backdrop(original, combined)
     combined = pc._solidify_product_interior(combined)
+
+    # Paper removal remains conservative: overlapping instruction sheets are retained
+    # because the hidden product pixels cannot be reconstructed from a single photo.
     combined = pc._remove_detached_paper_components(original, combined)
     return Image.fromarray(combined, mode="L")
 
@@ -130,14 +107,8 @@ def extract_product(original: Image.Image):
     return rgba
 
 
-def remove_background(
-    img: Image.Image,
-    cleanup=45,
-    edge_expand=1,
-    auto_settings=True,
-    prevent_background_showthrough=True,
-    strict_logo_cleanup=True,
-):
+def remove_background(img: Image.Image, cleanup=45, edge_expand=1, auto_settings=True,
+                      prevent_background_showthrough=True, strict_logo_cleanup=True):
     cutout = extract_product(img)
     recommendations = app.analyze_object_shape(cutout.getchannel("A"))
     return cutout, recommendations
