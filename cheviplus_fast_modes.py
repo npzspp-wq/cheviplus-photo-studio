@@ -1,27 +1,27 @@
 """Cheviplus Photo Studio 4.5: fast processing modes on the stable 4.1 core.
 
-This patch deliberately keeps the lightweight u2netp model.  The goal is to avoid
-4.4/BiRefNet slowdowns while letting the operator choose a safer mask strategy for
-very different automotive products.
+This patch deliberately keeps the lightweight u2netp model. The operator can choose
+a safer mask strategy for different automotive products without loading heavy models.
 """
 
 from __future__ import annotations
 
 import threading
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 from tkinter import ttk
 
 import app
 from cheviplus_stability_patch import StableApp
 
 APP_VERSION = "4.5"
-APP_BUILD = "2026.08.10.01"
+APP_BUILD = "2026.08.10.02"
 
 MODE_NORMAL = "Обычная деталь"
 MODE_CHROME = "Длинная / хром"
 MODE_CARPET = "Ковёр / светлый старый фон"
+MODE_LIGHT = "Светлый товар / светлые ковры"
 MODE_KIT = "Комплект / несколько деталей"
-MODES = (MODE_NORMAL, MODE_CHROME, MODE_CARPET, MODE_KIT)
+MODES = (MODE_NORMAL, MODE_CHROME, MODE_CARPET, MODE_LIGHT, MODE_KIT)
 
 _MODE_LOCAL = threading.local()
 _ORIGINAL_COMPOSE_IMAGE = app.compose_image
@@ -54,8 +54,8 @@ def _border_statistics(rgb):
 def remove_border_connected_backdrop(original: Image.Image, alpha: Image.Image) -> Image.Image:
     """Remove pale old backdrop connected to an outer image edge.
 
-    This is the part of the 4.2 experiment that worked well on floor mats. It is
-    available only in the explicit carpet/background mode, not globally.
+    Used only in the explicit old-background carpet mode. It is intentionally not
+    used for light products because beige/grey mats can resemble the pale backdrop.
     """
     import numpy as np
     from scipy import ndimage
@@ -94,15 +94,19 @@ def remove_border_connected_backdrop(original: Image.Image, alpha: Image.Image) 
     return Image.fromarray(a, mode="L")
 
 
-def _remove_background_carpet(img: Image.Image, cleanup=82, edge_expand=1, **_kwargs):
+def _segment(image: Image.Image):
     from rembg import remove
 
-    result = remove(
-        img.convert("RGBA"),
+    return remove(
+        image.convert("RGBA"),
         session=app.get_rembg_session(),
         alpha_matting=False,
         post_process_mask=False,
     ).convert("RGBA")
+
+
+def _remove_background_carpet(img: Image.Image, cleanup=82, edge_expand=1, **_kwargs):
+    result = _segment(img)
     raw_alpha = result.getchannel("A")
     recommendations = app.analyze_object_shape(raw_alpha)
     raw_alpha = remove_border_connected_backdrop(img, raw_alpha)
@@ -113,47 +117,55 @@ def _remove_background_carpet(img: Image.Image, cleanup=82, edge_expand=1, **_kw
     return result, recommendations
 
 
-def _remove_background_chrome(img: Image.Image, cleanup=82, edge_expand=1, **_kwargs):
-    """Gentle path for long reflective parts.
+def _remove_background_light(img: Image.Image, cleanup=82, edge_expand=1, **_kwargs):
+    """Special path for beige/light-grey products on a pale photo backdrop.
 
-    We keep the fast u2netp model but avoid the two most destructive stable-core
-    steps for chrome: old-background suppression and isolated-component pruning.
-    A low alpha threshold plus conservative hardening preserves weak reflective
-    surfaces better than the default aggressive cleanup.
+    u2netp can miss these almost completely when product and background have similar
+    brightness. We therefore segment a contrast-normalized copy, but apply the mask
+    to the untouched original RGB. This remains a single lightweight model pass.
+    Aggressive pale-background cleanup is deliberately disabled in this mode.
     """
-    from rembg import remove
+    original = img.convert("RGBA")
+    rgb = img.convert("RGB")
 
-    result = remove(
-        img.convert("RGBA"),
-        session=app.get_rembg_session(),
-        alpha_matting=False,
-        post_process_mask=False,
-    ).convert("RGBA")
+    # Stretch tonal range first, then add moderate local visual separation. This is
+    # only the model input; the exported product keeps the original colours.
+    model_input = ImageOps.autocontrast(rgb, cutoff=0.6)
+    model_input = ImageEnhance.Contrast(model_input).enhance(1.38)
+    model_input = ImageEnhance.Color(model_input).enhance(1.16)
+    model_input = ImageEnhance.Sharpness(model_input).enhance(1.12)
+
+    segmented = _segment(model_input)
+    raw_alpha = segmented.getchannel("A")
+    recommendations = app.analyze_object_shape(raw_alpha)
+
+    # Preserve weak pale-product probabilities instead of treating them as dirt.
+    cleaned = app.clean_alpha_mask(raw_alpha, cleanup=12, edge_expand=1)
+    original.putalpha(cleaned)
+    # Low hardening threshold prevents the branded replacement background from
+    # showing through light rubber while retaining a narrow natural edge.
+    original.putalpha(app.harden_alpha(original.getchannel("A"), 72))
+    return original, recommendations
+
+
+def _remove_background_chrome(img: Image.Image, cleanup=82, edge_expand=1, **_kwargs):
+    """Gentle path for long reflective parts."""
+    result = _segment(img)
     raw_alpha = result.getchannel("A")
     recommendations = app.analyze_object_shape(raw_alpha)
     cleaned = app.clean_alpha_mask(raw_alpha, cleanup=24, edge_expand=1)
     result.putalpha(cleaned)
-    # A lower floor intentionally restores weak reflective areas. True openings may
-    # remain better handled by Normal mode; this is an explicit operator choice.
     result.putalpha(app.harden_alpha(result.getchannel("A"), 88))
     return result, recommendations
 
 
 def _remove_background_kit(img: Image.Image, cleanup=82, edge_expand=1, **_kwargs):
     """Preserve multiple disconnected real parts and avoid single-object assumptions."""
-    from rembg import remove
-
-    result = remove(
-        img.convert("RGBA"),
-        session=app.get_rembg_session(),
-        alpha_matting=False,
-        post_process_mask=False,
-    ).convert("RGBA")
+    result = _segment(img)
     raw_alpha = result.getchannel("A")
     recommendations = app.analyze_object_shape(raw_alpha)
     cleaned = app.clean_alpha_mask(raw_alpha, cleanup=36, edge_expand=max(0, min(1, int(edge_expand))))
     result.putalpha(cleaned)
-    # Stability patch version preserves meaningful disconnected set components.
     result = app.remove_isolated_artifacts(result, strength=36)
     return result, recommendations
 
@@ -162,6 +174,8 @@ def remove_background(img: Image.Image, **kwargs):
     mode = _normalize_mode(getattr(_MODE_LOCAL, "mode", MODE_NORMAL))
     if mode == MODE_CARPET:
         return _remove_background_carpet(img, **kwargs)
+    if mode == MODE_LIGHT:
+        return _remove_background_light(img, **kwargs)
     if mode == MODE_CHROME:
         return _remove_background_chrome(img, **kwargs)
     if mode == MODE_KIT:
@@ -212,7 +226,11 @@ class FastModeApp(StableApp):
             combo.grid(row=5, column=1, columnspan=4, sticky="w", padx=8, pady=(10, 4))
             ttk.Label(
                 advanced,
-                text="Хром — мягкая маска; ковёр — очистка светлой подложки; комплект — сохраняет отдельные детали.",
+                text=(
+                    "Хром — мягкая маска; светлый товар — усиление контраста только для AI; "
+                    "ковёр — очистка светлой старой подложки; комплект — сохраняет отдельные детали."
+                ),
+                wraplength=720,
             ).grid(row=6, column=0, columnspan=6, sticky="w", pady=(0, 4))
 
     def current_options(self):
