@@ -1,0 +1,1 @@
+4.3 ISNet test rejected on real chrome/bumper/kit images. Preserve main 4.1 until a better model path is validated.
