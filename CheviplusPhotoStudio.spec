@@ -29,7 +29,7 @@ hiddenimports += [
 ]
 
 a = Analysis(
-    ["app.py"],
+    ["launcher.py"],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

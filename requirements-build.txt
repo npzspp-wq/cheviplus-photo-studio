@@ -3,4 +3,5 @@ rembg==2.0.59
 onnxruntime==1.19.2
 pymatting==1.1.12
 numpy==1.26.4
+scipy==1.13.1
 pyinstaller==6.10.0
