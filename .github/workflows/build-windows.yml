@@ -53,9 +53,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path models | Out-Null
-          Invoke-WebRequest `
-            -Uri "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx" `
-            -OutFile "models/u2netp.onnx"
+          $env:U2NET_HOME = (Resolve-Path "models").Path
+          python -c "from rembg import new_session; new_session('birefnet-general')"
 
       - name: Build autonomous Windows program
         run: pyinstaller --noconfirm --clean CheviplusPhotoStudio.spec
