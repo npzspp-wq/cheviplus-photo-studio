@@ -18,7 +18,7 @@ import app
 
 
 APP_VERSION = "4.2"
-APP_BUILD = "2026.08.10.03"
+APP_BUILD = "2026.08.10.04"
 
 
 def _border_statistics(rgb):
@@ -55,17 +55,18 @@ def _alpha_geometry(alpha):
     return aspect, occupancy
 
 
+def _is_long_part(alpha):
+    aspect, occupancy = _alpha_geometry(alpha)
+    return aspect >= 2.35 and occupancy <= 0.68
+
+
 def remove_border_connected_backdrop(original: Image.Image, alpha: Image.Image) -> Image.Image:
     """Remove border-connected pale old backdrop without damaging long trim parts."""
 
     import numpy as np
     from scipy import ndimage
 
-    # Long, shallow parts (bumpers, mouldings, rails, pipes) are a known danger case:
-    # chrome/highlights can connect visually to the pale backdrop. For these, do not
-    # run the broad backdrop eraser; chrome recovery and normal alpha cleanup are safer.
-    aspect, occupancy = _alpha_geometry(alpha)
-    if aspect >= 2.35 and occupancy <= 0.62:
+    if _is_long_part(alpha):
         return alpha
 
     rgb = np.asarray(original.convert("RGB"), dtype=np.float32)
@@ -185,6 +186,61 @@ def recover_reflective_chrome(original: Image.Image, alpha: Image.Image) -> Imag
     return Image.fromarray(a, mode="L")
 
 
+def recover_long_reflective_edges(original: Image.Image, alpha: Image.Image) -> Image.Image:
+    """Conservatively reconnect reflective outer bands on long bumper/trim parts.
+
+    The normal chrome recovery only handles enclosed holes. Long bumpers often lose
+    chrome on their *outer* contour. For those objects we bridge only short horizontal
+    gaps supported by original-image structure, and avoid pixels that look like the
+    sampled backdrop.
+    """
+
+    import numpy as np
+    from scipy import ndimage
+
+    if not _is_long_part(alpha):
+        return alpha
+
+    rgb = np.asarray(original.convert("RGB"), dtype=np.float32)
+    a = np.asarray(alpha, dtype=np.uint8).copy()
+    h, w = a.shape
+    strong = a >= 120
+    if strong.sum() < 200:
+        return alpha
+
+    bg, mad = _border_statistics(rgb)
+    scaled = (rgb - bg[None, None, :]) / mad[None, None, :]
+    bg_distance = np.sqrt(np.sum(scaled * scaled, axis=2))
+    lum = rgb.mean(axis=2)
+    chroma = rgb.max(axis=2) - rgb.min(axis=2)
+    gx = ndimage.sobel(lum, axis=1)
+    gy = ndimage.sobel(lum, axis=0)
+    gradient = np.hypot(gx, gy)
+
+    # Structural support: original pixels unlike the direct backdrop, or carrying a
+    # clear edge/metal texture. Horizontal dilation is intentionally modest so real
+    # openings are not filled across the entire bumper.
+    support = (
+        (bg_distance >= 6.6)
+        | (lum <= float(bg.mean()) - 24.0)
+        | (chroma >= 38.0)
+        | (gradient >= 12.0)
+    )
+
+    horiz = np.ones((1, max(5, min(21, int(w * 0.035)))), dtype=bool)
+    vertical = np.ones((3, 1), dtype=bool)
+    bridge = ndimage.binary_closing(strong, structure=horiz, iterations=1)
+    bridge |= ndimage.binary_dilation(strong, structure=vertical, iterations=1)
+    recover = bridge & support & (a < 150)
+
+    # Do not expand far beyond the vicinity already supported by rembg.
+    near_object = ndimage.binary_dilation(strong, structure=np.ones((7, 11)), iterations=1)
+    recover &= near_object
+
+    a[recover] = np.maximum(a[recover], 205)
+    return Image.fromarray(a, mode="L")
+
+
 def remove_background(
     img: Image.Image,
     cleanup=45,
@@ -204,10 +260,23 @@ def remove_background(
 
     raw_alpha = result.getchannel("A")
     recommendations = app.analyze_object_shape(raw_alpha)
+    long_part = _is_long_part(raw_alpha)
 
-    # Recover reflective product areas first. Then apply backdrop cleanup only when
-    # geometry says the object is not a long/shallow trim-like part.
     raw_alpha = recover_reflective_chrome(img, raw_alpha)
+
+    if long_part:
+        # Long reflective parts get a separate conservative path. Do not run broad
+        # old-background suppression or isolated-artifact removal: both can destroy
+        # real bumper/chrome geometry when reflections resemble the backdrop.
+        raw_alpha = recover_long_reflective_edges(img, raw_alpha)
+        safe_cleanup = min(int(cleanup), 18)
+        safe_expand = max(0, min(int(edge_expand), 1))
+        cleaned_alpha = app.clean_alpha_mask(raw_alpha, safe_cleanup, safe_expand)
+        result.putalpha(cleaned_alpha)
+        if prevent_background_showthrough:
+            result.putalpha(app.harden_alpha(result.getchannel("A"), 96))
+        return result, recommendations
+
     raw_alpha = remove_border_connected_backdrop(img, raw_alpha)
 
     if auto_settings:
