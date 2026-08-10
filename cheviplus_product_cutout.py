@@ -1,14 +1,17 @@
 """Cheviplus Photo Studio 4.6 test: extract product first, then composite.
 
-This patch keeps the lightweight u2netp model but changes the logic around it:
-1) segment the product twice (original + contrast-normalized copy),
-2) combine both masks to preserve light/chrome details and separate kit pieces,
-3) remove only pale background regions that are truly connected to the photo edge,
-4) apply the resulting alpha mask to the untouched original pixels,
-5) let the existing compositor place that transparent cutout onto the selected brand background.
+Pipeline:
+1) segment product twice (original + contrast-normalized copy),
+2) combine masks to preserve light/chrome details and disconnected kit pieces,
+3) remove only low-confidence pale backdrop connected to the photo edge,
+4) make confident product interiors fully opaque while keeping a soft outer edge,
+5) remove only *detached* paper-like instruction sheets when they are safe to drop,
+6) apply the final mask to untouched original pixels,
+7) let the existing compositor place that transparent cutout on the selected background.
 
-The key rule is product preservation first. We do not fill holes globally and do not
-assume there is only one connected foreground object.
+The key rule is product preservation first. We never globally fill holes and never erase
+an overlapping instruction sheet if doing so would punch a rectangular hole through the
+product underneath it.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ import app
 from cheviplus_stability_patch import StableApp
 
 APP_VERSION = "4.6"
-APP_BUILD = "2026.08.10.01"
+APP_BUILD = "2026.08.10.02"
 
 
 def _segment_alpha(image: Image.Image) -> Image.Image:
@@ -68,7 +71,6 @@ def _meaningful_component_mask(alpha_array):
             continue
         bw = int(xs.max() - xs.min() + 1)
         bh = int(ys.max() - ys.min() + 1)
-        # Keep real kit pieces even when disconnected from the biggest item.
         sizeable = size >= max(45, int(largest * 0.006))
         extended = max(bw / max(1, w), bh / max(1, h)) >= 0.055 and size >= 28
         if sizeable or extended:
@@ -99,7 +101,6 @@ def _remove_edge_connected_backdrop(original: Image.Image, alpha_array):
     lum = rgb.mean(axis=2)
     chroma = rgb.max(axis=2) - rgb.min(axis=2)
 
-    # Candidate background must resemble the photographed backdrop.
     bg_like = (distance <= 5.0) | ((lum >= 192) & (chroma <= 38))
     bg_like = ndimage.binary_closing(
         bg_like,
@@ -120,34 +121,101 @@ def _remove_edge_connected_backdrop(original: Image.Image, alpha_array):
         return alpha_array
 
     exterior = np.isin(labels, list(border_ids))
-    # Never erase high-confidence foreground merely because it is pale. This is what
-    # protects beige mats and chrome reflections.
     erase = exterior & (alpha_array < 150)
     cleaned = alpha_array.copy()
     cleaned[erase] = 0
     return cleaned
 
 
+def _solidify_product_interior(alpha_array):
+    """Stop replacement background from showing through a detected product.
+
+    Confident and medium-confidence foreground becomes opaque. Only the narrow weak
+    transition band remains soft. This is deliberately different from filling holes:
+    zero/near-zero openings stay zero, so true bumper holes remain transparent.
+    """
+    import numpy as np
+    from scipy import ndimage
+
+    a = alpha_array.astype(np.uint8, copy=True)
+    core = a >= 52
+    # Close only one-pixel speckle gaps inside already detected material.
+    core = ndimage.binary_closing(core, structure=np.ones((3, 3), dtype=bool), iterations=1)
+    a[core] = 255
+
+    edge = (a >= 18) & ~core
+    # Raise weak edge opacity without converting true background to product.
+    if edge.any():
+        boosted = np.clip(a[edge].astype(np.int16) * 2 + 28, 0, 210).astype(np.uint8)
+        a[edge] = np.maximum(a[edge], boosted)
+    a[a < 18] = 0
+    return a
+
+
+def _remove_detached_paper_components(original: Image.Image, alpha_array):
+    """Drop only paper-like foreground components that are detached from the product.
+
+    If a sheet overlaps a mat/part, it shares the same foreground component. We keep
+    it rather than create a fake transparent rectangle where the hidden product cannot
+    be reconstructed from the source photo.
+    """
+    import numpy as np
+    from scipy import ndimage
+
+    rgb = np.asarray(original.convert("RGB"), dtype=np.float32)
+    a = alpha_array.copy()
+    foreground = a >= 120
+    labels, count = ndimage.label(foreground)
+    if count <= 1:
+        return a
+
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    largest = max(1, int(sizes.max()))
+    image_area = foreground.size
+    luminance = rgb.mean(axis=2)
+    chroma = rgb.max(axis=2) - rgb.min(axis=2)
+
+    for idx in range(1, count + 1):
+        component = labels == idx
+        size = int(sizes[idx])
+        if size <= 0 or size >= largest * 0.45:
+            continue
+        ys, xs = np.nonzero(component)
+        if not len(xs):
+            continue
+        bw = int(xs.max() - xs.min() + 1)
+        bh = int(ys.max() - ys.min() + 1)
+        bbox_area = max(1, bw * bh)
+        fill = size / bbox_area
+        aspect = bw / max(1, bh)
+        area_fraction = size / image_area
+        pale_fraction = float(((luminance[component] >= 178) & (chroma[component] <= 52)).mean())
+
+        paper_like = (
+            0.0007 <= area_fraction <= 0.045
+            and 0.48 <= aspect <= 2.8
+            and fill >= 0.42
+            and pale_fraction >= 0.56
+        )
+        if paper_like:
+            a[component] = 0
+    return a
+
+
 def build_product_mask(original: Image.Image) -> Image.Image:
     """Return a product-first alpha mask from two lightweight segmentation passes."""
     import numpy as np
-    from scipy import ndimage
 
     alpha_original = np.asarray(_segment_alpha(original), dtype=np.uint8)
     alpha_enhanced = np.asarray(_segment_alpha(_enhanced_model_input(original)), dtype=np.uint8)
 
-    # Union preserves product pixels that either view recognized. Weighted boost helps
-    # weak light/chrome regions without turning every soft background pixel opaque.
     combined = np.maximum(alpha_original, alpha_enhanced)
     support = _meaningful_component_mask(combined)
     combined = np.where(support, combined, 0).astype(np.uint8)
     combined = _remove_edge_connected_backdrop(original, combined)
-
-    # Keep natural edges; do not fill true holes. Only suppress tiny alpha noise.
-    combined[combined < 10] = 0
-    solid = combined >= 96
-    solid = ndimage.binary_closing(solid, structure=np.ones((3, 3)), iterations=1)
-    combined[solid] = np.maximum(combined[solid], 220)
+    combined = _solidify_product_interior(combined)
+    combined = _remove_detached_paper_components(original, combined)
     return Image.fromarray(combined, mode="L")
 
 
@@ -175,8 +243,6 @@ def remove_background(
 class ProductCutoutApp(StableApp):
     def _build(self):
         super()._build()
-        # Keep the existing stable interface. The header/version makes it clear that
-        # this is the product-first test build; no extra heavy controls are required.
 
 
 app.APP_VERSION = APP_VERSION
