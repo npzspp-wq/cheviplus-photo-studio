@@ -17,7 +17,7 @@ import app
 
 
 APP_VERSION = "4.2"
-APP_BUILD = "2026.08.10.01"
+APP_BUILD = "2026.08.10.02"
 
 
 def _border_statistics(rgb):
@@ -51,18 +51,24 @@ def remove_border_connected_backdrop(original: Image.Image, alpha: Image.Image) 
 
     rgb = np.asarray(original.convert("RGB"), dtype=np.float32)
     a = np.asarray(alpha, dtype=np.uint8).copy()
-    h, w, _ = rgb.shape
 
     bg, mad = _border_statistics(rgb)
     scaled = (rgb - bg[None, None, :]) / mad[None, None, :]
     distance = np.sqrt(np.sum(scaled * scaled, axis=2))
 
-    # Backdrops in the current workflow are normally pale/near-white. The adaptive
-    # distance keeps this useful on slightly grey photographed backgrounds as well.
     lum = rgb.mean(axis=2)
     chroma = rgb.max(axis=2) - rgb.min(axis=2)
     bg_like = (distance <= 5.8) | ((lum >= 185) & (chroma <= 48))
-    bg_like = ndimage.binary_closing(bg_like, structure=np.ones((5, 5)), iterations=1)
+
+    # Important: preserve border-connected pixels during closing. scipy's default
+    # border_value=0 erodes the outermost pixels, which made the component look
+    # detached from the image edge and defeated this cleanup entirely.
+    bg_like = ndimage.binary_closing(
+        bg_like,
+        structure=np.ones((5, 5)),
+        iterations=1,
+        border_value=1,
+    )
 
     labels, count = ndimage.label(bg_like)
     if not count:
@@ -80,9 +86,6 @@ def remove_border_connected_backdrop(original: Image.Image, alpha: Image.Image) 
     exterior = np.isin(labels, list(border_ids))
     exterior = ndimage.binary_dilation(exterior, structure=np.ones((3, 3)), iterations=1)
 
-    # Do not punch through confident dark/coloured product pixels. This primarily
-    # removes pale old-backdrop regions and lets later component cleanup discard
-    # small logo islands that become detached.
     very_bg_like = exterior & ((distance <= 6.4) | ((lum >= 178) & (chroma <= 58)))
     a[very_bg_like] = 0
     return Image.fromarray(a, mode="L")
@@ -109,8 +112,6 @@ def recover_reflective_chrome(original: Image.Image, alpha: Image.Image) -> Imag
     if strong.sum() < 250:
         return alpha
 
-    # Build a conservative local silhouette. Closing bridges reflective gaps without
-    # flattening large concavities of the part.
     radius = max(2, min(9, int(min(h, w) * 0.012)))
     structure = np.ones((3, 3), dtype=bool)
     envelope = ndimage.binary_closing(strong, structure=structure, iterations=radius)
@@ -128,7 +129,6 @@ def recover_reflective_chrome(original: Image.Image, alpha: Image.Image) -> Imag
     luminance = rgb.mean(axis=2)
     chroma = rgb.max(axis=2) - rgb.min(axis=2)
 
-    # Local gradient helps identify reflective detail/metal texture.
     gray = luminance
     gx = ndimage.sobel(gray, axis=1)
     gy = ndimage.sobel(gray, axis=0)
@@ -149,7 +149,6 @@ def recover_reflective_chrome(original: Image.Image, alpha: Image.Image) -> Imag
         if not len(xs):
             continue
 
-        # Candidate must be genuinely internal to the product silhouette.
         if xs.min() <= 1 or ys.min() <= 1 or xs.max() >= w - 2 or ys.max() >= h - 2:
             continue
 
@@ -161,8 +160,6 @@ def recover_reflective_chrome(original: Image.Image, alpha: Image.Image) -> Imag
         ring = ndimage.binary_dilation(component, iterations=2) & ~component
         ring_object_fraction = float(strong[ring].mean()) if ring.any() else 0.0
 
-        # Direct backdrop-like holes are intentionally left transparent. Reflective
-        # metal is restored only with strong contextual support from surrounding part.
         visually_not_backdrop = (
             mean_bg_distance >= 7.2
             or mean_lum <= float(bg.mean()) - 28.0
@@ -175,8 +172,6 @@ def recover_reflective_chrome(original: Image.Image, alpha: Image.Image) -> Imag
     if not recover.any():
         return alpha
 
-    # Restore a solid interior and retain a narrow transition around the recovered
-    # region so chrome edges do not look pasted in.
     inner = ndimage.binary_erosion(recover, iterations=1)
     edge = recover & ~inner
     a[inner] = 255
@@ -204,8 +199,6 @@ def remove_background(
     raw_alpha = result.getchannel("A")
     recommendations = app.analyze_object_shape(raw_alpha)
 
-    # Stage 1: remove large border-connected old backdrop regions before normal
-    # alpha cleanup. Stage 2: recover chrome that rembg interpreted as background.
     raw_alpha = remove_border_connected_backdrop(img, raw_alpha)
     raw_alpha = recover_reflective_chrome(img, raw_alpha)
 
