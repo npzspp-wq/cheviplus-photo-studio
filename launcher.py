@@ -1,7 +1,7 @@
 """Stable launcher for the packaged Windows application."""
 
-from cheviplus_stability_patch import StableApp
+from cheviplus_license import LicenseApp
 
 
 if __name__ == "__main__":
-    StableApp().mainloop()
+    LicenseApp().mainloop()
