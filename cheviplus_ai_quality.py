@@ -1,4 +1,4 @@
-"""Cheviplus Photo Studio 5.1: faster repeated AI processing."""
+"""Cheviplus Photo Studio 5.2: faster AI plus conservative hole cleanup."""
 
 from __future__ import annotations
 
@@ -12,26 +12,19 @@ import app
 import cheviplus_product_cutout as pc
 import cheviplus_backdrop_quality as bq
 
-APP_VERSION = "5.1"
+APP_VERSION = "5.2"
 APP_BUILD = "2026.08.11.01"
 MODE_FAST = "Быстро — локально"
 MODE_QUALITY = "Максимальное качество AI — локально"
 MODES = (MODE_FAST, MODE_QUALITY)
 QUALITY_MAX_SIDE = 1600
 MASK_CACHE_LIMIT = 16
-
 _LOCAL = threading.local()
 _ORIGINAL_COMPOSE = app.compose_image
 _FAST_REMOVE = bq.remove_background
-
-# One shared BiRefNet session for the whole application. Earlier builds kept one
-# session per worker thread, so Preview and Process could each load the model again.
 _QUALITY_SESSION = None
 _SESSION_LOCK = threading.Lock()
 _INFERENCE_LOCK = threading.Lock()
-
-# Small in-memory LRU cache. The mask from Preview can be reused by Process when the
-# source file has not changed. Only masks are cached; finished photos are not.
 _MASK_CACHE = OrderedDict()
 _MASK_CACHE_LOCK = threading.Lock()
 
@@ -59,15 +52,9 @@ def _working_copy(image: Image.Image):
 def _quality_segment_alpha(image: Image.Image) -> Image.Image:
     from rembg import remove
     work, original_size = _working_copy(image)
-    # Serializing the heavy inference prevents two workers from competing for RAM.
-    # Non-AI work (resize/export/background) can still run in parallel elsewhere.
     with _INFERENCE_LOCK:
-        result = remove(
-            work,
-            session=get_quality_session(),
-            alpha_matting=False,
-            post_process_mask=False,
-        ).convert("RGBA")
+        result = remove(work, session=get_quality_session(), alpha_matting=False,
+                        post_process_mask=False).convert("RGBA")
     alpha = result.getchannel("A")
     if alpha.size != original_size:
         alpha = alpha.resize(original_size, Image.Resampling.LANCZOS)
@@ -106,6 +93,49 @@ def _cache_put(key, mask):
             _MASK_CACHE.popitem(last=False)
 
 
+def _restore_real_holes(raw_alpha, cleaned):
+    """Restore only strong background islands enclosed by the product.
+
+    The solidify step is useful for protecting pale products, but it can fill genuine
+    bumper/grille openings. BiRefNet's raw alpha already knows about many of those
+    openings. We restore only confident, enclosed background components from that raw
+    mask. Tiny speckles and very large uncertain regions are ignored.
+    """
+    import numpy as np
+    from scipy import ndimage
+
+    raw = np.asarray(raw_alpha, dtype=np.uint8)
+    out = np.asarray(cleaned, dtype=np.uint8).copy()
+    h, w = raw.shape
+    image_area = h * w
+
+    # Confident raw background that the later preservation pass filled back in.
+    candidates = (raw <= 24) & (out >= 160)
+    labels, count = ndimage.label(candidates)
+    if count == 0:
+        return out
+
+    min_area = max(20, int(image_area * 0.00003))
+    max_area = max(min_area + 1, int(image_area * 0.08))
+    margin = max(2, int(min(h, w) * 0.004))
+
+    for idx in range(1, count + 1):
+        ys, xs = np.where(labels == idx)
+        area = len(xs)
+        if area < min_area or area > max_area:
+            continue
+        # A true hole should be internal. Never punch out anything connected to the
+        # image boundary or extremely close to it.
+        if xs.min() <= margin or ys.min() <= margin or xs.max() >= w - 1 - margin or ys.max() >= h - 1 - margin:
+            continue
+        region = labels == idx
+        # Slightly soften only the hole edge; do not alter the exterior product edge.
+        hole = ndimage.binary_dilation(region, iterations=1)
+        out[hole] = np.minimum(out[hole], raw[hole])
+
+    return out.astype(np.uint8)
+
+
 def build_quality_mask(original: Image.Image) -> Image.Image:
     import numpy as np
     alpha = np.asarray(_quality_segment_alpha(original), dtype=np.uint8)
@@ -113,6 +143,7 @@ def build_quality_mask(original: Image.Image) -> Image.Image:
     support = pc._meaningful_component_mask(combined)
     combined = np.where(support, combined, 0).astype(np.uint8)
     combined = pc._solidify_product_interior(combined)
+    combined = _restore_real_holes(alpha, combined)
     combined = pc._remove_detached_paper_components(original, combined)
     return Image.fromarray(combined, mode="L")
 
@@ -128,7 +159,6 @@ def remove_background(img: Image.Image, **kwargs):
         if mask is None:
             mask = build_quality_mask(img)
             _cache_put(cache_key, mask)
-
         rgba = img.convert("RGBA")
         rgba.putalpha(mask)
         info = app.analyze_object_shape(mask)
@@ -180,11 +210,9 @@ class AIQualityApp(bq.BackdropQualityApp):
         combo = ttk.Combobox(frame, textvariable=self.ai_quality_var, values=MODES,
                              state="readonly", width=36)
         combo.grid(row=7, column=1, columnspan=4, sticky="w", padx=8, pady=(10, 4))
-        ttk.Label(
-            frame,
-            text="Максимальное качество: BiRefNet Lite. Маска предпросмотра повторно используется при обработке.",
-            wraplength=720,
-        ).grid(row=8, column=0, columnspan=6, sticky="w", pady=(0, 4))
+        ttk.Label(frame,
+                  text="Максимальное качество: BiRefNet Lite. Сохраняет реальные отверстия и кэширует маску.",
+                  wraplength=720).grid(row=8, column=0, columnspan=6, sticky="w", pady=(0, 4))
 
     def current_options(self):
         options = super().current_options()
