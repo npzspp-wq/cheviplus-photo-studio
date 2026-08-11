@@ -25,9 +25,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
 
+      - name: Generate brand assets
+        run: python tools/build_brand_assets.py
+
       - name: Run compile and stability checks
         run: |
-          python -m compileall app.py launcher.py cheviplus_stability_patch.py cheviplus_product_cutout.py cheviplus_backdrop_quality.py cheviplus_ai_quality.py
+          python -m compileall app.py launcher.py cheviplus_stability_patch.py cheviplus_product_cutout.py cheviplus_backdrop_quality.py cheviplus_ai_quality.py cheviplus_workstation_stats.py cheviplus_license.py tools/build_brand_assets.py
           python tools/audit_static.py
           python -m unittest discover -s tests -p "test_*.py"
 
@@ -49,6 +52,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
 
+      - name: Generate brand assets
+        run: python tools/build_brand_assets.py
+
       - name: Download offline AI models
         shell: pwsh
         run: |
@@ -68,7 +74,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "dist/Cheviplus Photo Studio/input" | Out-Null
           New-Item -ItemType Directory -Force -Path "dist/Cheviplus Photo Studio/output" | Out-Null
-          "Запустите Cheviplus Photo Studio.exe. Есть два локальных режима AI: быстрый и максимального качества. Интернет после установки не требуется." |
+          "Запустите Cheviplus Photo Studio.exe. Доступны быстрый и максимальный локальные AI-режимы. Лицензия рабочего места отображается в программе." |
             Set-Content -Encoding UTF8 "dist/Cheviplus Photo Studio/ИНСТРУКЦИЯ.txt"
 
       - uses: actions/upload-artifact@v4
