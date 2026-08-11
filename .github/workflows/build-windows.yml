@@ -68,16 +68,16 @@ jobs:
           @'
           @echo off
           setlocal
-          powershell -NoProfile -ExecutionPolicy Bypass -Command "$appDir=(Resolve-Path '%%~dp0').Path; $exe=Join-Path $appDir 'Cheviplus Photo Studio.exe'; $desktop=[Environment]::GetFolderPath('Desktop'); $shortcut=Join-Path $desktop 'Cheviplus Photo Studio.lnk'; $ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut($shortcut); $s.TargetPath=$exe; $s.WorkingDirectory=$appDir; $s.IconLocation=$exe+',0'; $s.Description='Cheviplus Photo Studio'; $s.Save()"
+          powershell -NoProfile -ExecutionPolicy Bypass -Command "$appDir=[System.IO.Path]::GetFullPath('%~dp0'); $exe=Join-Path $appDir 'Cheviplus Photo Studio.exe'; if (-not (Test-Path -LiteralPath $exe)) { Write-Host 'Не найден файл программы:' $exe; exit 2 }; $desktop=[Environment]::GetFolderPath('Desktop'); $shortcut=Join-Path $desktop 'Cheviplus Photo Studio.lnk'; $ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut($shortcut); $s.TargetPath=$exe; $s.WorkingDirectory=$appDir.TrimEnd([char]92); $s.IconLocation=$exe+',0'; $s.Description='Cheviplus Photo Studio'; $s.Save()"
           if errorlevel 1 (
-            echo Не удалось создать ярлык.
+            echo Ошибка создания ярлыка. Убедитесь, что файл находится внутри папки Cheviplus Photo Studio.
             pause
             exit /b 1
           )
-          echo Ярлык Cheviplus Photo Studio создан на рабочем столе.
+          echo Ярлык Cheviplus Photo Studio создан правильно.
           pause
-          '@ | Set-Content -Encoding ASCII "$appDir/Создать ярлык на рабочем столе.cmd"
-          "Запустите Cheviplus Photo Studio.exe. Чтобы добавить ярлык, один раз запустите файл 'Создать ярлык на рабочем столе.cmd'. Ярлык будет создан на рабочем столе с фирменной иконкой программы. Доступны быстрый и максимальный локальные AI-режимы. Лицензия рабочего места отображается в программе." |
+          '@ | Set-Content -Encoding Default "$appDir/Создать ярлык на рабочем столе.cmd"
+          "Запустите Cheviplus Photo Studio.exe. Для ярлыка один раз запустите 'Создать ярлык на рабочем столе.cmd' непосредственно из папки программы. Старый неправильный ярлык перед этим удалите." |
             Set-Content -Encoding UTF8 "$appDir/ИНСТРУКЦИЯ.txt"
       - uses: actions/upload-artifact@v4
         with:
