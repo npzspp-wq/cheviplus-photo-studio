@@ -47,6 +47,7 @@ exe = EXE(
     name="Cheviplus Photo Studio",
     console=False,
     upx=False,
+    icon="assets/app_icon.ico",
 )
 
 coll = COLLECT(
