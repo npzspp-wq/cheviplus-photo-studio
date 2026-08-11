@@ -1,4 +1,4 @@
-"""Cheviplus Photo Studio 5.6: two proven modes plus protected admin settings."""
+"""Cheviplus Photo Studio 5.9: two proven modes with admin-only service controls."""
 from __future__ import annotations
 from collections import OrderedDict
 from pathlib import Path
@@ -14,8 +14,8 @@ import app
 import cheviplus_product_cutout as pc
 import cheviplus_backdrop_quality as bq
 
-APP_VERSION="5.6"
-APP_BUILD="2026.08.11.02"
+APP_VERSION="5.9"
+APP_BUILD="2026.08.11.07"
 MODE_FAST="Быстро — локально"
 MODE_QUALITY="Максимальное качество AI — локально"
 MODES=(MODE_FAST, MODE_QUALITY)
@@ -167,12 +167,6 @@ def _find_label_frame(root,title):
  return None
 
 
-def _all_children(root):
- for child in root.winfo_children():
-  yield child
-  yield from _all_children(child)
-
-
 class AIQualityApp(bq.BackdropQualityApp):
  def _build(self):
   super()._build(); import tkinter as tk
@@ -184,52 +178,24 @@ class AIQualityApp(bq.BackdropQualityApp):
   self.ai_quality_combo.grid(row=7,column=1,columnspan=4,sticky="w",padx=8,pady=(10,4))
   ttk.Label(frame,text="Быстрый режим — для массовой обработки. Максимальное качество — BiRefNet Lite для сложных фото.",wraplength=720).grid(row=8,column=0,columnspan=6,sticky="w",pady=(0,4))
   admin_bar=ttk.Frame(frame); admin_bar.grid(row=9,column=0,columnspan=6,sticky="w",pady=(8,3))
-  self.admin_button=ttk.Button(admin_bar,text="🔒 Настройки администратора",command=self._toggle_admin_settings)
+  self.admin_button=ttk.Button(admin_bar,text="🔒 Администратор",command=self._toggle_admin_settings)
   self.admin_button.pack(side="left")
   self.change_pin_button=ttk.Button(admin_bar,text="Сменить PIN",command=self._change_pin)
-  self.admin_note=ttk.Label(admin_bar,text="  Основные настройки защищены")
+  self.admin_note=ttk.Label(admin_bar,text="  Настройки обработки доступны")
   self.admin_note.pack(side="left")
   self.after_idle(self._apply_admin_lock)
 
- def _protected_frames(self):
-  result=[]
-  for widget in _all_children(self):
-   try:
-    if isinstance(widget,ttk.LabelFrame):
-     title=str(widget.cget("text")).strip()
-     if title.startswith(("1.","2.","3.")):result.append(widget)
-   except Exception:pass
-  return result
-
- def _set_widget_locked(self,widget,locked):
-  if widget in (getattr(self,"admin_button",None),getattr(self,"change_pin_button",None),getattr(self,"ai_quality_combo",None)):return
-  cls=widget.winfo_class().lower()
-  editable=("entry","spinbox","combobox","checkbutton","radiobutton","scale","button")
-  if not any(name in cls for name in editable):return
-  try:
-   if locked:
-    if not hasattr(widget,"_cheviplus_prev_state"):
-     try:widget._cheviplus_prev_state=str(widget.cget("state"))
-     except Exception:widget._cheviplus_prev_state="normal"
-    widget.configure(state="disabled")
-   else:
-    previous=getattr(widget,"_cheviplus_prev_state","normal")
-    widget.configure(state=previous)
-  except Exception:pass
-
  def _apply_admin_lock(self):
-  locked=not self._admin_unlocked
-  for frame in self._protected_frames():
-   for widget in _all_children(frame):self._set_widget_locked(widget,locked)
+  # Since 5.9 processing/export/background settings are intentionally available to operators.
   self.ai_quality_combo.configure(state="readonly")
   if self._admin_unlocked:
-   self.admin_button.configure(text="🔓 Заблокировать настройки")
+   self.admin_button.configure(text="🔓 Закрыть администратора")
    self.change_pin_button.pack(side="left",padx=(8,0))
-   self.admin_note.configure(text="  Режим администратора открыт")
+   self.admin_note.configure(text="  Администратор: лицензия и рабочее место")
   else:
-   self.admin_button.configure(text="🔒 Настройки администратора")
+   self.admin_button.configure(text="🔒 Администратор")
    self.change_pin_button.pack_forget()
-   self.admin_note.configure(text="  Основные настройки защищены")
+   self.admin_note.configure(text="  Настройки обработки доступны")
 
  def _create_first_pin(self):
   from tkinter import simpledialog,messagebox
@@ -243,7 +209,7 @@ class AIQualityApp(bq.BackdropQualityApp):
   try:_save_admin_record(pin)
   except Exception as exc:
    messagebox.showerror("PIN",f"Не удалось сохранить PIN: {exc}",parent=self); return False
-  messagebox.showinfo("PIN","PIN администратора создан. Настройки открыты.",parent=self); return True
+  messagebox.showinfo("PIN","PIN администратора создан.",parent=self); return True
 
  def _toggle_admin_settings(self):
   from tkinter import simpledialog,messagebox
@@ -253,7 +219,7 @@ class AIQualityApp(bq.BackdropQualityApp):
   if record is None:
    if not self._create_first_pin():return
   else:
-   pin=simpledialog.askstring("Настройки администратора","Введите PIN:",show="*",parent=self)
+   pin=simpledialog.askstring("Администратор","Введите PIN:",show="*",parent=self)
    if pin is None:return
    if not _verify_pin(pin,record.get("salt",""),record.get("hash","")):
     messagebox.showerror("Доступ запрещён","Неверный PIN.",parent=self); return
