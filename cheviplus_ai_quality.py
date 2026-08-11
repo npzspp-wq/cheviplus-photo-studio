@@ -1,7 +1,9 @@
-"""Cheviplus Photo Studio 5.0: fast local BiRefNet quality mode."""
+"""Cheviplus Photo Studio 5.1: faster repeated AI processing."""
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from pathlib import Path
 import threading
 from PIL import Image
 from tkinter import ttk
@@ -10,25 +12,38 @@ import app
 import cheviplus_product_cutout as pc
 import cheviplus_backdrop_quality as bq
 
-APP_VERSION = "5.0"
-APP_BUILD = "2026.08.10.02"
+APP_VERSION = "5.1"
+APP_BUILD = "2026.08.11.01"
 MODE_FAST = "Быстро — локально"
 MODE_QUALITY = "Максимальное качество AI — локально"
 MODES = (MODE_FAST, MODE_QUALITY)
 QUALITY_MAX_SIDE = 1600
+MASK_CACHE_LIMIT = 16
+
 _LOCAL = threading.local()
-_QUALITY_SESSION_LOCAL = threading.local()
 _ORIGINAL_COMPOSE = app.compose_image
 _FAST_REMOVE = bq.remove_background
 
+# One shared BiRefNet session for the whole application. Earlier builds kept one
+# session per worker thread, so Preview and Process could each load the model again.
+_QUALITY_SESSION = None
+_SESSION_LOCK = threading.Lock()
+_INFERENCE_LOCK = threading.Lock()
+
+# Small in-memory LRU cache. The mask from Preview can be reused by Process when the
+# source file has not changed. Only masks are cached; finished photos are not.
+_MASK_CACHE = OrderedDict()
+_MASK_CACHE_LOCK = threading.Lock()
+
 
 def get_quality_session():
-    session = getattr(_QUALITY_SESSION_LOCAL, "session", None)
-    if session is None:
-        from rembg import new_session
-        session = new_session("birefnet-general-lite")
-        _QUALITY_SESSION_LOCAL.session = session
-    return session
+    global _QUALITY_SESSION
+    if _QUALITY_SESSION is None:
+        with _SESSION_LOCK:
+            if _QUALITY_SESSION is None:
+                from rembg import new_session
+                _QUALITY_SESSION = new_session("birefnet-general-lite")
+    return _QUALITY_SESSION
 
 
 def _working_copy(image: Image.Image):
@@ -44,12 +59,51 @@ def _working_copy(image: Image.Image):
 def _quality_segment_alpha(image: Image.Image) -> Image.Image:
     from rembg import remove
     work, original_size = _working_copy(image)
-    result = remove(work, session=get_quality_session(), alpha_matting=False,
-                    post_process_mask=False).convert("RGBA")
+    # Serializing the heavy inference prevents two workers from competing for RAM.
+    # Non-AI work (resize/export/background) can still run in parallel elsewhere.
+    with _INFERENCE_LOCK:
+        result = remove(
+            work,
+            session=get_quality_session(),
+            alpha_matting=False,
+            post_process_mask=False,
+        ).convert("RGBA")
     alpha = result.getchannel("A")
     if alpha.size != original_size:
         alpha = alpha.resize(original_size, Image.Resampling.LANCZOS)
     return alpha
+
+
+def _cache_key_from_source(source, mode):
+    if mode != MODE_QUALITY:
+        return None
+    try:
+        path = Path(source).resolve()
+        stat = path.stat()
+        return (str(path).lower(), stat.st_mtime_ns, stat.st_size, mode)
+    except Exception:
+        return None
+
+
+def _cache_get(key):
+    if key is None:
+        return None
+    with _MASK_CACHE_LOCK:
+        mask = _MASK_CACHE.get(key)
+        if mask is None:
+            return None
+        _MASK_CACHE.move_to_end(key)
+        return mask.copy()
+
+
+def _cache_put(key, mask):
+    if key is None:
+        return
+    with _MASK_CACHE_LOCK:
+        _MASK_CACHE[key] = mask.copy()
+        _MASK_CACHE.move_to_end(key)
+        while len(_MASK_CACHE) > MASK_CACHE_LIMIT:
+            _MASK_CACHE.popitem(last=False)
 
 
 def build_quality_mask(original: Image.Image) -> Image.Image:
@@ -68,9 +122,18 @@ def remove_background(img: Image.Image, **kwargs):
     if mode != MODE_QUALITY:
         return _FAST_REMOVE(img, **kwargs)
     try:
+        cache_key = getattr(_LOCAL, "cache_key", None)
+        mask = _cache_get(cache_key)
+        cache_hit = mask is not None
+        if mask is None:
+            mask = build_quality_mask(img)
+            _cache_put(cache_key, mask)
+
         rgba = img.convert("RGBA")
-        rgba.putalpha(build_quality_mask(img))
-        return rgba, app.analyze_object_shape(rgba.getchannel("A"))
+        rgba.putalpha(mask)
+        info = app.analyze_object_shape(mask)
+        info["mask_cache_hit"] = cache_hit
+        return rgba, info
     except Exception as exc:
         message = str(exc).lower()
         if "allocate memory" in message or "onnxruntimeerror" in message:
@@ -79,12 +142,17 @@ def remove_background(img: Image.Image, **kwargs):
 
 
 def compose_image(*args, processing_mode=MODE_FAST, **kwargs):
-    previous = getattr(_LOCAL, "mode", MODE_FAST)
-    _LOCAL.mode = processing_mode if processing_mode in MODES else MODE_FAST
+    previous_mode = getattr(_LOCAL, "mode", MODE_FAST)
+    previous_key = getattr(_LOCAL, "cache_key", None)
+    mode = processing_mode if processing_mode in MODES else MODE_FAST
+    _LOCAL.mode = mode
+    source = args[0] if args else kwargs.get("source")
+    _LOCAL.cache_key = _cache_key_from_source(source, mode)
     try:
         return _ORIGINAL_COMPOSE(*args, **kwargs)
     finally:
-        _LOCAL.mode = previous
+        _LOCAL.mode = previous_mode
+        _LOCAL.cache_key = previous_key
 
 
 def _find_label_frame(root, title):
@@ -112,9 +180,11 @@ class AIQualityApp(bq.BackdropQualityApp):
         combo = ttk.Combobox(frame, textvariable=self.ai_quality_var, values=MODES,
                              state="readonly", width=36)
         combo.grid(row=7, column=1, columnspan=4, sticky="w", padx=8, pady=(10, 4))
-        ttk.Label(frame,
-                  text="Максимальное качество: BiRefNet Lite, ускоренный локальный режим; интернет не нужен.",
-                  wraplength=720).grid(row=8, column=0, columnspan=6, sticky="w", pady=(0, 4))
+        ttk.Label(
+            frame,
+            text="Максимальное качество: BiRefNet Lite. Маска предпросмотра повторно используется при обработке.",
+            wraplength=720,
+        ).grid(row=8, column=0, columnspan=6, sticky="w", pady=(0, 4))
 
     def current_options(self):
         options = super().current_options()
@@ -150,6 +220,8 @@ class AIQualityApp(bq.BackdropQualityApp):
     def show_preview(self, image, name):
         self._end_ai_indicator()
         super().show_preview(image, name)
+        if self.ai_quality_var.get() == MODE_QUALITY:
+            self.status.set("Предпросмотр готов • AI-маска сохранена для быстрой обработки")
 
     def start(self):
         super().start()
