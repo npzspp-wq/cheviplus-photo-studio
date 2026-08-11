@@ -9,9 +9,10 @@ import cheviplus_ai_quality as aq
 
 class AIQualityTests(unittest.TestCase):
     def test_modes_are_explicit(self):
+        self.assertIn(aq.MODE_AUTO, aq.MODES)
         self.assertIn(aq.MODE_FAST, aq.MODES)
         self.assertIn(aq.MODE_QUALITY, aq.MODES)
-        self.assertNotEqual(aq.MODE_FAST, aq.MODE_QUALITY)
+        self.assertEqual(len(set(aq.MODES)), 3)
 
     def test_quality_session_model_name_is_birefnet_lite(self):
         source = aq.get_quality_session.__code__.co_consts
@@ -21,14 +22,22 @@ class AIQualityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "photo.jpg"
             path.write_bytes(b"first")
-            key1 = aq._cache_key_from_source(path, aq.MODE_QUALITY)
+            key1 = aq._cache_key_from_source(path, aq.MODE_QUALITY, aq.QUALITY_MAX_SIDE)
             path.write_bytes(b"second-longer")
-            key2 = aq._cache_key_from_source(path, aq.MODE_QUALITY)
+            key2 = aq._cache_key_from_source(path, aq.MODE_QUALITY, aq.QUALITY_MAX_SIDE)
             self.assertNotEqual(key1, key2)
-            self.assertIsNone(aq._cache_key_from_source(path, aq.MODE_FAST))
+            self.assertIsNone(aq._cache_key_from_source(path, aq.MODE_FAST, aq.AUTO_SIMPLE_SIDE))
+
+    def test_auto_cache_key_includes_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "photo.jpg"
+            path.write_bytes(b"same-file")
+            low = aq._cache_key_from_source(path, aq.MODE_AUTO, aq.AUTO_SIMPLE_SIDE)
+            high = aq._cache_key_from_source(path, aq.MODE_AUTO, aq.QUALITY_MAX_SIDE)
+            self.assertNotEqual(low, high)
 
     def test_mask_cache_returns_copy(self):
-        key = ("unit-test", 1, 1, aq.MODE_QUALITY)
+        key = ("unit-test", 1, 1, aq.MODE_QUALITY, aq.QUALITY_MAX_SIDE)
         mask = Image.new("L", (8, 8), 200)
         aq._cache_put(key, mask)
         cached = aq._cache_get(key)
