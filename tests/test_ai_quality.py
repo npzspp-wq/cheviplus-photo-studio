@@ -33,8 +33,20 @@ class AIQualityTests(unittest.TestCase):
             path = Path(tmp) / "photo.jpg"
             path.write_bytes(b"same-file")
             low = aq._cache_key_from_source(path, aq.MODE_AUTO, aq.AUTO_SIMPLE_SIDE)
-            high = aq._cache_key_from_source(path, aq.MODE_AUTO, aq.QUALITY_MAX_SIDE)
+            high = aq._cache_key_from_source(path, aq.MODE_AUTO, aq.AUTO_COMPLEX_SIDE)
             self.assertNotEqual(low, high)
+
+    def test_auto_never_uses_manual_max_resolution(self):
+        samples = [
+            Image.new("RGB", (1600, 900), "white"),
+            Image.new("RGB", (1600, 900), "gray"),
+            Image.new("RGB", (1600, 900), "black"),
+        ]
+        for image in samples:
+            engine, side = aq._auto_plan(image)
+            self.assertIn(engine, ("fast", "birefnet"))
+            if side is not None:
+                self.assertLess(side, aq.QUALITY_MAX_SIDE)
 
     def test_mask_cache_returns_copy(self):
         key = ("unit-test", 1, 1, aq.MODE_QUALITY, aq.QUALITY_MAX_SIDE)
