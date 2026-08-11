@@ -27,7 +27,7 @@ jobs:
 
       - name: Run compile and stability checks
         run: |
-          python -m compileall app.py
+          python -m compileall app.py launcher.py cheviplus_stability_patch.py cheviplus_product_cutout.py cheviplus_backdrop_quality.py cheviplus_ai_quality.py
           python tools/audit_static.py
           python -m unittest discover -s tests -p "test_*.py"
 
@@ -49,13 +49,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
 
-      - name: Download offline AI model
+      - name: Download offline AI models
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path models | Out-Null
           Invoke-WebRequest `
             -Uri "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx" `
             -OutFile "models/u2netp.onnx"
+          $env:U2NET_HOME = (Resolve-Path "models").Path
+          python -c "from rembg import new_session; new_session('birefnet-general-lite')"
+          Get-ChildItem models
 
       - name: Build autonomous Windows program
         run: pyinstaller --noconfirm --clean CheviplusPhotoStudio.spec
@@ -65,7 +68,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "dist/Cheviplus Photo Studio/input" | Out-Null
           New-Item -ItemType Directory -Force -Path "dist/Cheviplus Photo Studio/output" | Out-Null
-          "Запустите Cheviplus Photo Studio.exe. Python и интернет не требуются." |
+          "Запустите Cheviplus Photo Studio.exe. Есть два локальных режима AI: быстрый и максимального качества. Интернет после установки не требуется." |
             Set-Content -Encoding UTF8 "dist/Cheviplus Photo Studio/ИНСТРУКЦИЯ.txt"
 
       - uses: actions/upload-artifact@v4
