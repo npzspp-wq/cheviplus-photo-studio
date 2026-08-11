@@ -1,14 +1,10 @@
-"""Cheviplus Photo Studio 5.8: local license core.
-
-This version prepares the workstation-bound license state and UI. Remote server
-verification is intentionally not implemented here; it will replace the local
-administrator test controls in the next stage.
-"""
+"""Cheviplus Photo Studio 5.8: local license core with branded UI."""
 from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 import json
 import os
+import tkinter as tk
 from tkinter import ttk, messagebox
 
 import app
@@ -16,7 +12,7 @@ import cheviplus_ai_quality as aq
 from cheviplus_workstation_stats import WorkstationStatsApp, load_stats
 
 APP_VERSION = "5.8"
-APP_BUILD = "2026.08.11.05"
+APP_BUILD = "2026.08.11.06"
 STATUS_ACTIVE = "active"
 STATUS_SUSPENDED = "suspended"
 STATUS_BLOCKED = "blocked"
@@ -151,6 +147,7 @@ def license_text(data, state):
 class LicenseApp(WorkstationStatsApp):
     def _build(self):
         super()._build()
+        self._apply_branding()
         frame = aq._find_label_frame(self, "3. Стабильная ручная обработка") or self
         box = ttk.LabelFrame(frame, text="Лицензия рабочего места", padding=6)
         box.grid(row=11, column=0, columnspan=6, sticky="ew", pady=(7, 3))
@@ -165,6 +162,37 @@ class LicenseApp(WorkstationStatsApp):
             button.pack(side="left", padx=(5, 0))
         self._refresh_license()
         self.after_idle(self._sync_license_admin_state)
+
+    def _apply_branding(self):
+        """Set EXE/window identity and place the approved brand logo in the header."""
+        try:
+            icon = app.resource_path("assets/app_icon.ico")
+            if icon.exists():
+                self.iconbitmap(default=str(icon))
+        except Exception:
+            pass
+        try:
+            logo_path = app.resource_path("assets/app_logo.png")
+            if not logo_path.exists():
+                return
+            logo = app.Image.open(logo_path).convert("RGBA")
+            target_h = 54
+            target_w = max(1, round(logo.width * target_h / logo.height))
+            logo = logo.resize((target_w, target_h), app.Image.Resampling.LANCZOS)
+            self._brand_logo_photo = app.ImageTk.PhotoImage(logo)
+            header = None
+            for child in self.winfo_children():
+                if isinstance(child, tk.Frame):
+                    try:
+                        if child.cget("bg") == "#20252b":
+                            header = child
+                            break
+                    except Exception:
+                        pass
+            if header is not None:
+                tk.Label(header, image=self._brand_logo_photo, bg="#20252b", bd=0).pack(side="right", padx=20, pady=8)
+        except Exception:
+            pass
 
     def _sync_license_admin_state(self):
         try:
