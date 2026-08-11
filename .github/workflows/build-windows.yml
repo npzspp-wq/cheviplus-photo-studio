@@ -13,21 +13,17 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements-build.txt
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
-
       - name: Generate brand assets
         run: python tools/build_brand_assets.py
-
       - name: Run compile and stability checks
         run: |
           python -m compileall app.py launcher.py cheviplus_stability_patch.py cheviplus_product_cutout.py cheviplus_backdrop_quality.py cheviplus_ai_quality.py cheviplus_workstation_stats.py cheviplus_license.py tools/build_brand_assets.py
@@ -40,21 +36,17 @@ jobs:
     needs: checks
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements-build.txt
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
-
       - name: Generate brand assets
         run: python tools/build_brand_assets.py
-
       - name: Download offline AI models
         shell: pwsh
         run: |
@@ -65,18 +57,28 @@ jobs:
           $env:U2NET_HOME = (Resolve-Path "models").Path
           python -c "from rembg import new_session; new_session('birefnet-general-lite')"
           Get-ChildItem models
-
       - name: Build autonomous Windows program
         run: pyinstaller --noconfirm --clean CheviplusPhotoStudio.spec
-
-      - name: Add folders and instruction
+      - name: Add folders, desktop shortcut helper and instruction
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "dist/Cheviplus Photo Studio/input" | Out-Null
-          New-Item -ItemType Directory -Force -Path "dist/Cheviplus Photo Studio/output" | Out-Null
-          "Запустите Cheviplus Photo Studio.exe. Доступны быстрый и максимальный локальные AI-режимы. Лицензия рабочего места отображается в программе." |
-            Set-Content -Encoding UTF8 "dist/Cheviplus Photo Studio/ИНСТРУКЦИЯ.txt"
-
+          $appDir = "dist/Cheviplus Photo Studio"
+          New-Item -ItemType Directory -Force -Path "$appDir/input" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$appDir/output" | Out-Null
+          @'
+          @echo off
+          setlocal
+          powershell -NoProfile -ExecutionPolicy Bypass -Command "$appDir=(Resolve-Path '%%~dp0').Path; $exe=Join-Path $appDir 'Cheviplus Photo Studio.exe'; $desktop=[Environment]::GetFolderPath('Desktop'); $shortcut=Join-Path $desktop 'Cheviplus Photo Studio.lnk'; $ws=New-Object -ComObject WScript.Shell; $s=$ws.CreateShortcut($shortcut); $s.TargetPath=$exe; $s.WorkingDirectory=$appDir; $s.IconLocation=$exe+',0'; $s.Description='Cheviplus Photo Studio'; $s.Save()"
+          if errorlevel 1 (
+            echo Не удалось создать ярлык.
+            pause
+            exit /b 1
+          )
+          echo Ярлык Cheviplus Photo Studio создан на рабочем столе.
+          pause
+          '@ | Set-Content -Encoding ASCII "$appDir/Создать ярлык на рабочем столе.cmd"
+          "Запустите Cheviplus Photo Studio.exe. Чтобы добавить ярлык, один раз запустите файл 'Создать ярлык на рабочем столе.cmd'. Ярлык будет создан на рабочем столе с фирменной иконкой программы. Доступны быстрый и максимальный локальные AI-режимы. Лицензия рабочего места отображается в программе." |
+            Set-Content -Encoding UTF8 "$appDir/ИНСТРУКЦИЯ.txt"
       - uses: actions/upload-artifact@v4
         with:
           name: Cheviplus-Photo-Studio-Windows
