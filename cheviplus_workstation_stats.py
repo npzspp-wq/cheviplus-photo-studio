@@ -13,7 +13,7 @@ import app
 import cheviplus_ai_quality as aq
 
 APP_VERSION = "5.7"
-APP_BUILD = "2026.08.11.03"
+APP_BUILD = "2026.08.11.04"
 _STATS_LOCK = threading.Lock()
 
 
@@ -112,12 +112,6 @@ class WorkstationStatsApp(aq.AIQualityApp):
         self._build_stats_panel()
 
     def _build_stats_panel(self):
-        # Compact panel under the existing left controls; no processing settings are changed.
-        left = None
-        for widget in self.winfo_children():
-            if widget.winfo_class().lower().endswith("panedwindow"):
-                continue
-        # Use the stable manual-processing frame so the panel remains visible on different resolutions.
         frame = aq._find_label_frame(self, "3. Стабильная ручная обработка") or self
         box = ttk.LabelFrame(frame, text="Статистика рабочего места", padding=6)
         box.grid(row=10, column=0, columnspan=6, sticky="ew", pady=(7, 3))
@@ -158,9 +152,9 @@ class WorkstationStatsApp(aq.AIQualityApp):
         self._refresh_stats_panel()
 
     def start(self):
-        # Tracking starts only when a real batch is accepted by the base application.
-        self._batch_ok = 0; self._batch_errors = 0; self._batch_started_at = time.monotonic()
-        before = str(self.start_btn.cget("state"))
+        self._batch_ok = 0
+        self._batch_errors = 0
+        self._batch_started_at = time.monotonic()
         super().start()
         self._batch_tracking = str(self.start_btn.cget("state")) == "disabled"
         if not self._batch_tracking:
