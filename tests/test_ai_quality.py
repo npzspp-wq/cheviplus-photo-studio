@@ -38,6 +38,13 @@ class AIQualityTests(unittest.TestCase):
         cached_again = aq._cache_get(key)
         self.assertEqual(cached_again.getpixel((0, 0)), 200)
 
+    def test_admin_pin_hash_verifies_without_storing_plain_pin(self):
+        pin = "4729"
+        salt, digest = aq._hash_pin(pin, salt=b"0123456789abcdef")
+        self.assertTrue(aq._verify_pin(pin, salt, digest))
+        self.assertFalse(aq._verify_pin("4728", salt, digest))
+        self.assertNotIn(pin, digest)
+
 
 if __name__ == "__main__":
     unittest.main()
