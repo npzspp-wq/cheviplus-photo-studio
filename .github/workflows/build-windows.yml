@@ -13,21 +13,20 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements-build.txt
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
-
+      - name: Generate brand assets
+        run: python tools/build_brand_assets.py
       - name: Run compile and stability checks
         run: |
-          python -m compileall app.py
+          python -m compileall app.py launcher.py cheviplus_stability_patch.py cheviplus_product_cutout.py cheviplus_backdrop_quality.py cheviplus_ai_quality.py cheviplus_workstation_stats.py cheviplus_license.py tools/build_brand_assets.py
           python tools/audit_static.py
           python -m unittest discover -s tests -p "test_*.py"
 
@@ -37,39 +36,49 @@ jobs:
     needs: checks
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: requirements-build.txt
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
-
-      - name: Download offline AI model
+      - name: Generate brand assets
+        run: python tools/build_brand_assets.py
+      - name: Download offline AI models
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path models | Out-Null
           Invoke-WebRequest `
             -Uri "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx" `
             -OutFile "models/u2netp.onnx"
-
+          $env:U2NET_HOME = (Resolve-Path "models").Path
+          python -c "from rembg import new_session; new_session('birefnet-general-lite')"
       - name: Build autonomous Windows program
         run: pyinstaller --noconfirm --clean CheviplusPhotoStudio.spec
-
-      - name: Add folders and instruction
+      - name: Add working folders
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "dist/Cheviplus Photo Studio/input" | Out-Null
           New-Item -ItemType Directory -Force -Path "dist/Cheviplus Photo Studio/output" | Out-Null
-          "Запустите Cheviplus Photo Studio.exe. Python и интернет не требуются." |
-            Set-Content -Encoding UTF8 "dist/Cheviplus Photo Studio/ИНСТРУКЦИЯ.txt"
-
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path installer-dist | Out-Null
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\CheviplusPhotoStudio.iss"
+          Get-ChildItem installer-dist
       - uses: actions/upload-artifact@v4
         with:
-          name: Cheviplus-Photo-Studio-Windows
+          name: Cheviplus-Photo-Studio-Setup
+          path: installer-dist/Cheviplus-Photo-Studio-Setup.exe
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cheviplus-Photo-Studio-Portable
           path: dist/Cheviplus Photo Studio/
           retention-days: 30
