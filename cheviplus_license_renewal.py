@@ -12,7 +12,7 @@ import cheviplus_license as lic
 import cheviplus_license_registry as registry
 
 APP_VERSION = "5.12"
-APP_BUILD = "2026.08.13.02"
+APP_BUILD = "2026.08.13.03"
 
 
 def _renewal_payload(item: dict, months: int = 6) -> dict:
@@ -139,7 +139,6 @@ def _install_employee_renewal_button(self):
     try:
         frame = getattr(self, "admin_license_box", None)
         if frame is not None:
-            # Кнопка остаётся доступной после открытия администраторского блока.
             ttk.Button(frame, text="Загрузить продление…", command=lambda: _import_renewal_for_app(self)).pack(side="right", padx=4)
     except Exception:
         pass
@@ -180,7 +179,6 @@ def _renew_selected(window):
         messagebox.showerror("Продление", str(exc), parent=window)
 
 
-# Добавляем импорт продления в приложение без изменения существующей схемы активации.
 _original_build = registry.AdminRegistryApp._build
 def _build_with_renewal(self):
     _original_build(self)
