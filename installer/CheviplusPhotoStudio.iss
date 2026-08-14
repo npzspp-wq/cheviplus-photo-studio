@@ -34,7 +34,9 @@ RestartApplications=no
 Source: "..\dist\Cheviplus Photo Studio\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autodesktop}\Cheviplus Photo Studio"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"
+; Do NOT create a desktop shortcut here. Some branches use redirected/network
+; desktops where the user has no write access, which previously aborted Setup
+; with 0x80070005. The Start menu shortcut is reliable and sufficient.
 Name: "{userprograms}\Cheviplus Photo Studio"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"
 
 [Run]
