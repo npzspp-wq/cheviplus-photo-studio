@@ -94,10 +94,11 @@ def network_safe_save_result(image, source, output_dir, output_format, target_kb
     if not ok:
         raise PermissionError(reason)
 
-    # Existing app.save_result already supports Path/UNC correctly. Save to the
-    # requested directory, but convert raw permission errors into useful text.
+    # The profile writer captured at import time is the Sapphire/reference writer
+    # because launcher imports it first. Keeping it here preserves exact JPG metadata.
+    writer = getattr(network_safe_save_result, "_profile_writer", _ORIGINAL_SAVE_RESULT)
     try:
-        return _ORIGINAL_SAVE_RESULT(
+        return writer(
             image, source, output_dir, output_format,
             target_kb=target_kb, jpeg_quality=jpeg_quality,
         )
@@ -143,6 +144,7 @@ def open_output_safe(self):
 
 
 def install():
+    network_safe_save_result._profile_writer = _ORIGINAL_SAVE_RESULT
     app.save_result = network_safe_save_result
     app.App.start = start_with_output_preflight
     app.App.open_output = open_output_safe
