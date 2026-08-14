@@ -10,7 +10,6 @@ def mask_box(width, height, fill=1.0):
     if fill >= 0.99:
         arr[y0:y0+height, x0:x0+width] = 255
     else:
-        # open rectangular ring approximates moulding/open trim geometry
         t = max(3, int(min(width, height)*0.08))
         arr[y0:y0+t, x0:x0+width] = 255
         arr[y0+height-t:y0+height, x0:x0+width] = 255
@@ -27,5 +26,13 @@ def test_very_long_part_uses_width():
     assert scale.adaptive_reference_fill(mask_box(800, 180)) == 0.90
 
 
+def test_medium_long_part_is_between_reference_and_max():
+    assert scale.adaptive_reference_fill(mask_box(700, 300)) == 0.80
+
+
 def test_compact_solid_part_stays_moderate():
     assert scale.adaptive_reference_fill(mask_box(450, 420)) == 0.60
+
+
+def test_tall_part_gets_more_height():
+    assert scale.adaptive_reference_fill(mask_box(220, 650)) == 0.72
