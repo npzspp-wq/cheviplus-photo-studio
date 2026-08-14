@@ -1,18 +1,17 @@
-"""Cheviplus Photo Studio 5.12: offline renewal now, server-ready later."""
+"""Cheviplus Photo Studio 5.13: offline renewal now, server-ready later."""
 from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
 import json
-import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import app
 import cheviplus_license as lic
 import cheviplus_license_registry as registry
 
-APP_VERSION = "5.12"
-APP_BUILD = "2026.08.13.03"
+APP_VERSION = "5.13"
+APP_BUILD = "2026.08.14.01"
 
 
 def _renewal_payload(item: dict, months: int = 6) -> dict:
@@ -41,7 +40,6 @@ def save_renewal_package(license_number: str, destination: str | Path, months: i
         raise ValueError("Лицензия не найдена в локальном реестре.")
     payload = _renewal_payload(item, months)
     Path(destination).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
     data = lic._load_registry()
     for row in data.get("licenses", []):
         if isinstance(row, dict) and row.get("license_number") == license_number:
@@ -61,7 +59,6 @@ def apply_renewal_package(path: str | Path, show_errors: bool = False):
             raise ValueError("Некорректная подпись файла продления.")
         if not (data.get("renewal") or data.get("type") == "renewal"):
             return False
-
         current = lic.load_license()
         if not current.get("machine_fingerprint"):
             raise ValueError("Рабочее место ещё не активировано.")
@@ -69,7 +66,6 @@ def apply_renewal_package(path: str | Path, show_errors: bool = False):
             raise ValueError("Файл продления предназначен для другой лицензии.")
         if str(current.get("activation_token")) != str(data.get("token")):
             raise ValueError("Файл продления не соответствует этому рабочему месту.")
-
         now = datetime.now()
         old_until = lic._parse_dt(current.get("valid_until"))
         base = old_until if old_until and old_until > now else now
@@ -137,12 +133,36 @@ def _import_renewal_for_app(self):
 
 def _install_employee_renewal_button(self):
     try:
-        frame = getattr(self, "admin_license_box", None)
+        frame = getattr(self, "public_license_box", None) or getattr(self, "admin_license_box", None)
         if frame is not None:
-            ttk.Button(frame, text="Загрузить продление…", command=lambda: _import_renewal_for_app(self)).pack(side="right", padx=4)
+            self.renew_license_btn = ttk.Button(frame, text="Загрузить продление…", command=lambda: _import_renewal_for_app(self))
+            self.renew_license_btn.pack(side="right", padx=4)
+            data = lic.load_license()
+            if not data.get("machine_fingerprint"):
+                self.renew_license_btn.pack_forget()
     except Exception:
         pass
 
+
+def _show_renewal_when_activated(self):
+    try:
+        btn = getattr(self, "renew_license_btn", None)
+        data = lic.load_license()
+        if btn is None:
+            return
+        if data.get("machine_fingerprint"):
+            if not btn.winfo_manager(): btn.pack(side="right", padx=4)
+        else:
+            btn.pack_forget()
+    except Exception:
+        pass
+
+
+_original_refresh = registry.AdminRegistryApp._refresh_license
+def _refresh_with_renewal_button(self):
+    _original_refresh(self)
+    _show_renewal_when_activated(self)
+registry.AdminRegistryApp._refresh_license = _refresh_with_renewal_button
 
 _original_registry_init = registry.RegistryWindow.__init__
 def _registry_init(self, parent):
