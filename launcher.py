@@ -5,6 +5,8 @@ import sapphire_profile_patch  # noqa: F401
 import cheviplus_network_storage as network_storage  # noqa: F401
 from cheviplus_license_registry import AdminRegistryApp
 import cheviplus_license_renewal as renewal  # noqa: F401
+# Load adaptive scaling only after registry/AI modules have installed their processing hooks.
+import cheviplus_adaptive_scale  # noqa: F401
 from cheviplus_update_support import prepare_upgrade_environment
 
 # The newest feature module owns the visible application version/build.
