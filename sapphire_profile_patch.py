@@ -80,8 +80,6 @@ def _apply_reference_values(widget):
 
 def _load_settings_with_reference_migration(self):
     _ORIGINAL_LOAD_SETTINGS(self)
-    # Existing installations used one of the older 1C profiles. Migrate those
-    # automatically; do not overwrite explicitly chosen Site/Ozon/custom presets.
     current = self.profile_var.get()
     if current in LEGACY_1C_PROFILES or current not in app.EXPORT_PROFILES:
         _apply_reference_values(self)
@@ -144,7 +142,13 @@ def apply():
     app.DEFAULT_BACKGROUND_NAMES["Фон 3 — Сапфир"]=bg
     app.BUILTIN_BACKGROUNDS=app.discover_backgrounds()
     app.BUILTIN_BACKGROUNDS["Фон 3 — Сапфир"]=bg
-    app.save_result = _save_reference_result
+    # If the network guard is already active, register this writer under it instead
+    # of replacing the guard. Otherwise use it directly (normal launcher import order).
+    current_writer = app.save_result
+    if hasattr(current_writer, "_profile_writer"):
+        current_writer._profile_writer = _save_reference_result
+    else:
+        app.save_result = _save_reference_result
     app.App.load_settings = _load_settings_with_reference_migration
     app.App.reset_settings = _reset_settings_to_reference
 
