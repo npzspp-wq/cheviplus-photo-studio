@@ -142,13 +142,7 @@ def apply():
     app.DEFAULT_BACKGROUND_NAMES["Фон 3 — Сапфир"]=bg
     app.BUILTIN_BACKGROUNDS=app.discover_backgrounds()
     app.BUILTIN_BACKGROUNDS["Фон 3 — Сапфир"]=bg
-    # If the network guard is already active, register this writer under it instead
-    # of replacing the guard. Otherwise use it directly (normal launcher import order).
-    current_writer = app.save_result
-    if hasattr(current_writer, "_profile_writer"):
-        current_writer._profile_writer = _save_reference_result
-    else:
-        app.save_result = _save_reference_result
+    app.save_result = _save_reference_result
     app.App.load_settings = _load_settings_with_reference_migration
     app.App.reset_settings = _reset_settings_to_reference
 
