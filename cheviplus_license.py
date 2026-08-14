@@ -1,4 +1,4 @@
-"""Cheviplus Photo Studio 5.9: hidden workstation license and first-PC binding."""
+"""Cheviplus Photo Studio licensing: workstation binding and first-run activation."""
 from __future__ import annotations
 from calendar import monthrange
 from datetime import datetime, timedelta
@@ -10,8 +10,8 @@ import app
 import cheviplus_ai_quality as aq
 from cheviplus_workstation_stats import WorkstationStatsApp, load_stats
 
-APP_VERSION="5.9"
-APP_BUILD="2026.08.11.09"
+APP_VERSION="5.13"
+APP_BUILD="2026.08.14.01"
 STATUS_ACTIVE="active"; STATUS_SUSPENDED="suspended"; STATUS_BLOCKED="blocked"; STATUS_UNLICENSED="unlicensed"
 GRACE_DAYS=7; WARN_DAYS=14; CLOCK_ROLLBACK_TOLERANCE_HOURS=12
 _PACKAGE_SECRET=b"Cheviplus-Photo-Studio-5.9-workstation-package"
@@ -58,7 +58,6 @@ def _load_registry():
   if not isinstance(data,dict):raise ValueError
  except Exception:
   data={"version":1,"next_sequence":1,"licenses":[]}
- # Migrate already issued packages from 5.9 pre-numbering so sequence never goes backwards.
  try:
   issued=json.loads(_issued_path().read_text(encoding="utf-8"))
   if isinstance(issued,list) and not data.get("licenses"):
@@ -109,6 +108,10 @@ def _candidate_packages():
 def _bind_from_package(path):
  data=json.loads(Path(path).read_text(encoding="utf-8"))
  if not _verify_package(data): raise ValueError("Некорректный файл активации")
+ if data.get("renewal") or data.get("type")=="renewal":
+  raise ValueError("Это файл продления. Для первой активации нужен первоначальный файл лицензии.")
+ if not data.get("workstation_name") or not data.get("token"):
+  raise ValueError("В файле отсутствуют данные рабочего места")
  now=datetime.now(); lic={"version":3,"license_number":data.get("license_number") or "LEGACY","workstation_name":data["workstation_name"],"workstation_id":load_stats()["workstation_id"],"machine_fingerprint":_machine_fingerprint(),"activation_token":data["token"],"status":STATUS_ACTIVE,"activated_at":now.isoformat(timespec="seconds"),"valid_until":_add_months(now,int(data.get("months",6))).isoformat(timespec="seconds"),"last_seen_at":now.isoformat(timespec="seconds")}
  _license_path().write_text(json.dumps(lic,ensure_ascii=False,indent=2),encoding="utf-8")
  try: Path(path).unlink()
@@ -121,7 +124,7 @@ def _auto_bind_if_possible():
  for p in _candidate_packages():
   try:
    data=json.loads(p.read_text(encoding="utf-8"))
-   if _verify_package(data): valid.append(p)
+   if _verify_package(data) and not (data.get("renewal") or data.get("type")=="renewal"): valid.append(p)
   except Exception: pass
  if len(valid)==1:
   try:_bind_from_package(valid[0])
@@ -152,12 +155,16 @@ def license_state(now=None):
 class LicenseApp(WorkstationStatsApp):
  def _build(self):
   super()._build(); self._apply_branding(); frame=aq._find_label_frame(self,"3. Стабильная ручная обработка") or self
-  self.admin_license_box=ttk.LabelFrame(frame,text="Администрирование рабочего места",padding=6); self.admin_license_box.grid(row=11,column=0,columnspan=6,sticky="ew",pady=(7,3)); self.admin_license_box.grid_remove()
+  self.public_license_box=ttk.LabelFrame(frame,text="Лицензия рабочего места",padding=6); self.public_license_box.grid(row=11,column=0,columnspan=6,sticky="ew",pady=(7,3))
+  self.public_workstation_label=ttk.Label(self.public_license_box,text=""); self.public_workstation_label.pack(side="left",fill="x",expand=True)
+  self.activate_license_btn=ttk.Button(self.public_license_box,text="Загрузить лицензию…",command=self._activate_from_file); self.activate_license_btn.pack(side="right",padx=4)
+  self.admin_license_box=ttk.LabelFrame(frame,text="Администрирование рабочего места",padding=6); self.admin_license_box.grid(row=12,column=0,columnspan=6,sticky="ew",pady=(3,3)); self.admin_license_box.grid_remove()
   self.workstation_label=ttk.Label(self.admin_license_box,text=""); self.workstation_label.pack(side="left",fill="x",expand=True)
   ttk.Button(self.admin_license_box,text="Подготовить рабочее место",command=self._prepare_workstation).pack(side="right",padx=4)
   ttk.Button(self.admin_license_box,text="Приостановить",command=lambda:self._set_status(STATUS_SUSPENDED)).pack(side="right",padx=4)
   ttk.Button(self.admin_license_box,text="Возобновить",command=lambda:self._set_status(STATUS_ACTIVE)).pack(side="right",padx=4)
-  self._refresh_license(); self.after_idle(self._sync_license_admin_state)
+  self._activation_prompt_shown=False
+  self._refresh_license(); self.after_idle(self._sync_license_admin_state); self.after(400,self._first_run_activation_prompt)
  def _apply_branding(self):
   try:
    icon=app.resource_path("assets/app_icon.ico")
@@ -170,11 +177,43 @@ class LicenseApp(WorkstationStatsApp):
    if self._admin_unlocked:self.admin_license_box.grid()
    else:self.admin_license_box.grid_remove()
   except Exception:pass
+ def _sync_public_license_state(self,data,state):
+  try:
+   until=_parse_dt(data.get("valid_until")); d=until.strftime("%d.%m.%Y") if until else "—"
+   name=data.get("workstation_name") or "не активировано"; number=data.get("license_number") or "—"
+   if data.get("machine_fingerprint"):
+    self.public_workstation_label.configure(text=f"Лицензия: {number}   Рабочее место: {name}   До: {d}   Статус: {state}")
+    self.activate_license_btn.pack_forget()
+   else:
+    self.public_workstation_label.configure(text="Рабочее место не активировано. Загрузите выданный администратором файл .cpslicense.")
+    if not self.activate_license_btn.winfo_manager(): self.activate_license_btn.pack(side="right",padx=4)
+  except Exception:pass
  def _refresh_license(self):
   data,state,allowed=license_state(); self._license_allowed=allowed; self._license_state=state
   until=_parse_dt(data.get("valid_until")); d=until.strftime("%d.%m.%Y") if until else "—"
   name=data.get("workstation_name") or "не задано"; number=data.get("license_number") or "—"
   self.workstation_label.configure(text=f"Лицензия: {number}   Рабочее место: {name}   ID: {data.get('workstation_id','—')}   До: {d}   Статус: {state}")
+  self._sync_public_license_state(data,state)
+ def _activate_from_file(self):
+  current=load_license()
+  if current.get("machine_fingerprint"):
+   messagebox.showinfo("Активация","Это рабочее место уже активировано. Для продления используйте файл продления лицензии.",parent=self); return
+  path=filedialog.askopenfilename(parent=self,title="Выберите файл лицензии",filetypes=[("Cheviplus license","*.cpslicense"),("Все файлы","*.*")])
+  if not path:return
+  try:
+   data=_bind_from_package(path)
+   self._refresh_license()
+   until=_parse_dt(data.get("valid_until")); d=until.strftime("%d.%m.%Y") if until else "—"
+   messagebox.showinfo("Рабочее место активировано",f"Лицензия: {data.get('license_number','—')}\nРабочее место: {data.get('workstation_name','—')}\nСрок действия: до {d}\n\nЛицензия привязана к этому компьютеру.",parent=self)
+  except Exception as exc:
+   messagebox.showerror("Активация лицензии",str(exc),parent=self)
+ def _first_run_activation_prompt(self):
+  if self._activation_prompt_shown:return
+  self._activation_prompt_shown=True
+  data,state,allowed=license_state()
+  if allowed or data.get("machine_fingerprint"):return
+  if messagebox.askyesno("Рабочее место не активировано","Для работы необходимо активировать это рабочее место.\n\nЗагрузить файл лицензии сейчас?",parent=self):
+   self._activate_from_file()
  def _prepare_workstation(self):
   if not self._admin_unlocked:return
   name=simpledialog.askstring("Рабочее место","Введите название рабочего места:",parent=self)
@@ -183,21 +222,25 @@ class LicenseApp(WorkstationStatsApp):
   dest=filedialog.asksaveasfilename(parent=self,title="Сохранить файл для филиала",defaultextension=".cpslicense",initialfile=f"Cheviplus_{safe}.cpslicense",filetypes=[("Cheviplus license","*.cpslicense")])
   if not dest:return
   payload=create_workstation_package(name,dest)
-  messagebox.showinfo("Готово",f"Рабочее место подготовлено.\n\nНомер лицензии: {payload['license_number']}\nНазвание: {payload['workstation_name']}\nСрок после активации: 6 календарных месяцев.\n\nОтправьте файл в филиал вместе с Setup. При первом запуске программа привяжется к первому компьютеру.",parent=self)
+  messagebox.showinfo("Готово",f"Рабочее место подготовлено.\n\nНомер лицензии: {payload['license_number']}\nНазвание: {payload['workstation_name']}\nСрок после активации: 6 календарных месяцев.\n\nОтправьте файл в филиал вместе с Setup.",parent=self)
  def _set_status(self,status):
   if not self._admin_unlocked:return
   data=load_license()
   if not data.get("machine_fingerprint"):return
   data["status"]=status; save_license(data); self._refresh_license()
- def start_preview(self):
+ def _license_required(self):
   self._refresh_license()
-  if not self._license_allowed:
-   messagebox.showwarning("Cheviplus Photo Studio","Рабочее место не активировано или программа запущена не на зарегистрированном компьютере. Обратитесь к администратору.",parent=self); return
+  if self._license_allowed:return False
+  data=load_license()
+  if not data.get("machine_fingerprint"):
+   if messagebox.askyesno("Cheviplus Photo Studio","Рабочее место не активировано.\n\nЗагрузить файл лицензии сейчас?",parent=self): self._activate_from_file()
+   self._refresh_license(); return not self._license_allowed
+  messagebox.showwarning("Cheviplus Photo Studio","Лицензия этого рабочего места сейчас недействительна. Обратитесь к администратору.",parent=self); return True
+ def start_preview(self):
+  if self._license_required():return
   super().start_preview()
  def start(self):
-  self._refresh_license()
-  if not self._license_allowed:
-   messagebox.showwarning("Cheviplus Photo Studio","Рабочее место не активировано или программа запущена не на зарегистрированном компьютере. Обратитесь к администратору.",parent=self); return
+  if self._license_required():return
   super().start()
 
 app.APP_VERSION=APP_VERSION; app.APP_BUILD=APP_BUILD; aq.APP_VERSION=APP_VERSION; aq.APP_BUILD=APP_BUILD
