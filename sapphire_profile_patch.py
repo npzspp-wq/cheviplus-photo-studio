@@ -1,9 +1,26 @@
-"""Sapphire branding and approved 1C export profile for the 5.9 application."""
+"""Sapphire branding and confirmed 1C export profile.
+
+Confirmed in the user's real 1C loader:
+- 1280x960 pixels
+- 4:3
+- RGB JPEG
+- JPEG quality 90
+- no obsolete 100 KB cap
+
+These values are now treated as a protected 1C preset so branch users cannot
+accidentally return to the incompatible 1024x685/1024x768 profiles.
+"""
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import app
 
 SAPPHIRE_BG = app.APP_DIR / "sapphire_background.png"
+ONE_C_PROFILE = "1С — 1280×960, 4:3, JPG (проверено)"
+APP_VERSION = "5.14"
+APP_BUILD = "2026.08.17.01"
+ONE_C_WIDTH = 1280
+ONE_C_HEIGHT = 960
+ONE_C_QUALITY = 90
 
 
 def _font(size: int, bold: bool = True):
@@ -42,18 +59,62 @@ def ensure_sapphire_background(path: Path = SAPPHIRE_BG):
     return path
 
 
+def _set_confirmed_1c(self):
+    self.profile_var.set(ONE_C_PROFILE)
+    self.width_var.set(str(ONE_C_WIDTH))
+    self.height_var.set(str(ONE_C_HEIGHT))
+    self.format_var.set("JPG")
+    self.target_kb_var.set("0")
+    self.jpeg_quality_var.set(str(ONE_C_QUALITY))
+
+
+def _force_confirmed_1c_defaults(self):
+    old_load_settings(self)
+    profile = self.profile_var.get()
+    if profile.startswith("1С —") or profile not in app.EXPORT_PROFILES:
+        _set_confirmed_1c(self)
+
+
+def _confirmed_reset(self):
+    old_reset_settings(self)
+    _set_confirmed_1c(self)
+
+
 def apply():
-    # Replace the obsolete 1024x685 preset with the approved true 4:3 1C standard.
-    app.EXPORT_PROFILES.pop("1С — 1024×685, JPG до 100 КБ",None)
-    profile_name="1С — 1024×768, 4:3, JPG"
-    app.EXPORT_PROFILES={
-        profile_name:{"width":1024,"height":768,"format":"JPG","target_kb":0,"quality":90},
+    for name in list(app.EXPORT_PROFILES):
+        if name.startswith("1С —"):
+            app.EXPORT_PROFILES.pop(name, None)
+    app.EXPORT_PROFILES = {
+        ONE_C_PROFILE: {
+            "width": ONE_C_WIDTH,
+            "height": ONE_C_HEIGHT,
+            "format": "JPG",
+            "target_kb": 0,
+            "quality": ONE_C_QUALITY,
+        },
         **app.EXPORT_PROFILES,
     }
+
+    original_build = app.App._build
+    def build_with_1c_defaults(self):
+        original_build(self)
+        _set_confirmed_1c(self)
+    app.App._build = build_with_1c_defaults
+
+    global old_load_settings, old_reset_settings
+    old_load_settings = app.App.load_settings
+    old_reset_settings = app.App.reset_settings
+    app.App.load_settings = _force_confirmed_1c_defaults
+    app.App.reset_settings = _confirmed_reset
+
     bg=ensure_sapphire_background()
     app.DEFAULT_BACKGROUND_NAMES["Фон 3 — Сапфир"]=bg
     app.BUILTIN_BACKGROUNDS=app.discover_backgrounds()
     app.BUILTIN_BACKGROUNDS["Фон 3 — Сапфир"]=bg
+
+    # Visible version for this tested branch.
+    app.APP_VERSION = APP_VERSION
+    app.APP_BUILD = APP_BUILD
 
 
 apply()
