@@ -1,8 +1,8 @@
 """Seamless full-surface plexiglass effect for Cheviplus Photo Studio.
 
-The effect is intentionally edge-free: it does not draw a visible glass rectangle.
-It creates a clearly visible, soft mirror reflection below the product plus broad
-surface highlights, matching the approved visual reference.
+Version 5.15. The reflection is built from the actual segmented product cutout,
+not from differences between the final image and the branded backdrop. This makes
+the acrylic reflection visible and stable even when the backdrop contains logos.
 """
 from __future__ import annotations
 
@@ -11,14 +11,14 @@ from tkinter import ttk
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
-from scipy import ndimage
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 import app
+import cheviplus_ai_quality as aq
 
 APP_VERSION = "5.15"
-APP_BUILD = "2026.08.17.04"
-DEFAULT_INTENSITY = 42
+APP_BUILD = "2026.08.17.05"
+DEFAULT_INTENSITY = 45
 MIN_ENABLED_INTENSITY = 15
 
 _ORIGINAL_COMPOSE = app.compose_image
@@ -29,138 +29,150 @@ _ORIGINAL_LOAD_SETTINGS = app.App.load_settings
 _ORIGINAL_RESET_SETTINGS = app.App.reset_settings
 
 
-def _product_mask(final_img: Image.Image, background_path: Path) -> np.ndarray:
-    w, h = final_img.size
-    bg = app.fit_cover(Image.open(background_path).convert("RGB"), (w, h))
-    a = np.asarray(final_img.convert("RGB"), dtype=np.int16)
-    b = np.asarray(bg, dtype=np.int16)
-    diff = np.max(np.abs(a - b), axis=2)
-    mask = diff > 22
+def _rebuild_product_cutout(source, options):
+    """Recreate the exact positioned product used by the processing pipeline."""
+    original = Image.open(source)
+    processing_mode = options.get("processing_mode", aq.MODE_FAST)
+    previous_mode = getattr(aq._LOCAL, "mode", aq.MODE_FAST)
+    previous_key = getattr(aq._LOCAL, "cache_key", None)
+    aq._LOCAL.mode = processing_mode if processing_mode in aq.MODES else aq.MODE_FAST
+    aq._LOCAL.cache_key = aq._cache_key_from_source(source, aq._LOCAL.mode)
+    try:
+        product, auto_info = aq.remove_background(
+            original,
+            cleanup=options.get("cleanup", 82),
+            edge_expand=options.get("edge_expand", 1),
+            auto_settings=options.get("auto_settings", False),
+            prevent_background_showthrough=options.get("prevent_background_showthrough", True),
+            strict_logo_cleanup=options.get("strict_logo_cleanup", False),
+        )
+    finally:
+        aq._LOCAL.mode = previous_mode
+        aq._LOCAL.cache_key = previous_key
 
-    yy, xx = np.ogrid[:h, :w]
-    central = (xx > w * 0.05) & (xx < w * 0.95) & (yy > h * 0.08) & (yy < h * 0.84)
-    mask &= central
-    mask = ndimage.binary_closing(mask, iterations=2)
-    labels, count = ndimage.label(mask)
-    if count:
-        sizes = np.bincount(labels.ravel())
-        sizes[0] = 0
-        main_id = int(sizes.argmax())
-        main = labels == main_id
-        distance = ndimage.distance_transform_edt(~main)
-        keep = main.copy()
-        main_size = max(1, int(sizes[main_id]))
-        for idx in range(1, count + 1):
-            if idx == main_id or sizes[idx] <= 0:
-                continue
-            comp = labels == idx
-            if sizes[idx] >= main_size * 0.012 and float(distance[comp].min()) < max(22, min(w, h) * 0.05):
-                keep |= comp
-        mask = keep
-    return mask
+    product = app.trim_transparency(product)
+    product_fill = float(options.get("product_fill", 0.86))
+    if options.get("auto_settings"):
+        product_fill = auto_info.get("fill", product_fill)
+    if options.get("straighten"):
+        product = app.trim_transparency(app.auto_straighten(product))
+    if options.get("remove_product_logo"):
+        product = app.remove_product_logo_region(product, options.get("logo_remove_strength", 55))
+
+    sharpness = max(0, min(100, int(options.get("sharpness", 45))))
+    rgb = product.convert("RGB")
+    rgb = ImageEnhance.Contrast(rgb).enhance(1.02)
+    if sharpness:
+        rgb = rgb.filter(ImageFilter.UnsharpMask(radius=0.65 + sharpness / 180, percent=45 + int(sharpness * 1.25), threshold=2))
+    product = Image.merge("RGBA", (*rgb.split(), product.getchannel("A")))
+
+    cw = int(options.get("canvas_width", 1280))
+    ch = int(options.get("canvas_height", 960))
+    max_w = int(cw * product_fill)
+    max_h = int(ch * product_fill)
+    ratio = min(max_w / max(1, product.width), max_h / max(1, product.height))
+    product = product.resize((max(1, int(product.width * ratio)), max(1, int(product.height * ratio))), Image.Resampling.LANCZOS)
+    x = (cw - product.width) // 2
+    y = int(ch * 0.54 - product.height / 2)
+    y = max(20, min(y, ch - product.height - 20))
+    return product, x, y
 
 
-def apply_plexiglass_effect(image: Image.Image, background_path: Path, intensity: int = DEFAULT_INTENSITY) -> Image.Image:
-    """Add the approved acrylic-floor look: visible reflection, no visible glass edge."""
-    intensity = max(0, min(70, int(intensity)))
+def _add_floor_gloss(base: Image.Image, intensity: int):
+    """Add broad acrylic highlights over the whole lower surface, with no border."""
+    w, h = base.size
+    sheen = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(sheen)
+    alpha = int(18 + intensity * 0.42)
+    band = max(28, int(w * 0.03))
+    for center in (int(w * 0.14), int(w * 0.78)):
+        draw.polygon([
+            (center - band * 3, int(h * 0.36)),
+            (center - band, int(h * 0.36)),
+            (center + band * 3, h),
+            (center + band, h),
+        ], fill=(255, 255, 255, alpha))
+    sheen = sheen.filter(ImageFilter.GaussianBlur(radius=max(20, int(w * 0.02))))
+    return Image.alpha_composite(base, sheen)
+
+
+def apply_plexiglass_from_product(image: Image.Image, product: Image.Image, x: int, y: int, intensity: int = DEFAULT_INTENSITY) -> Image.Image:
+    """Apply approved visible acrylic-floor reflection under the actual product."""
+    intensity = max(0, min(75, int(intensity)))
     if intensity <= 0:
         return image
 
     base = image.convert("RGBA")
     w, h = base.size
-    mask = _product_mask(base, Path(background_path))
-    ys, xs = np.nonzero(mask)
-    if len(xs) < 100:
-        return base
-
-    x0, x1 = int(xs.min()), int(xs.max()) + 1
-    y0, y1 = int(ys.min()), int(ys.max()) + 1
-    foreground = base.crop((x0, y0, x1, y1)).copy()
-    alpha = Image.fromarray((mask[y0:y1, x0:x1] * 255).astype(np.uint8), mode="L")
-    alpha = alpha.filter(ImageFilter.GaussianBlur(radius=max(0.4, h / 1700)))
-    foreground.putalpha(alpha)
-
-    reflection = foreground.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+    reflection = product.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
     rw, rh = reflection.size
+
+    # Preserve most product height like the approved reference, but softly stretch vertically.
     reflected_h = max(1, int(rh * 0.92))
     reflection = reflection.resize((rw, reflected_h), Image.Resampling.LANCZOS)
 
-    arr = np.asarray(reflection.getchannel("A"), dtype=np.float32)
-    # Strong near the contact point, then smoothly disappears downward.
-    fade = np.linspace(0.78, 0.0, reflected_h, dtype=np.float32)[:, None]
-    opacity = 0.38 + intensity / 115.0
-    arr = np.clip(arr * fade * opacity, 0, 255).astype(np.uint8)
-    alpha_ref = Image.fromarray(arr, mode="L").filter(
-        ImageFilter.GaussianBlur(radius=max(0.7, h / 950))
+    alpha = np.asarray(reflection.getchannel("A"), dtype=np.float32)
+    fade = np.linspace(0.72, 0.02, reflected_h, dtype=np.float32)[:, None]
+    strength = 0.38 + intensity / 125.0
+    alpha = np.clip(alpha * fade * strength, 0, 255).astype(np.uint8)
+    reflection.putalpha(
+        Image.fromarray(alpha, mode="L").filter(ImageFilter.GaussianBlur(radius=max(0.7, h / 1100)))
     )
-    reflection.putalpha(alpha_ref)
 
-    # Put the mirror image directly under the part so it reads as polished acrylic.
-    paste_y = min(h - 1, y1 - max(3, int(rh * 0.075)))
-    max_h = max(0, h - paste_y)
-    if max_h > 0:
-        reflection = reflection.crop((0, 0, rw, min(reflected_h, max_h)))
-        base.alpha_composite(reflection, (x0, paste_y))
+    # The mirror begins immediately at the product's contact line.
+    paste_y = min(h - 1, y + product.height - max(2, int(product.height * 0.045)))
+    available = h - paste_y
+    if available > 0:
+        reflection = reflection.crop((0, 0, rw, min(reflected_h, available)))
+        base.alpha_composite(reflection, (x, paste_y))
 
-    # A gentle contact glow anchors the part to the glossy surface without changing its normal shadow.
+    # Soft contact darkening makes the product sit on the acrylic while keeping its existing shadow.
     contact = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     cd = ImageDraw.Draw(contact)
-    cx = (x0 + x1) // 2
-    contact_w = max(24, int((x1 - x0) * 0.72))
-    contact_h = max(10, int((y1 - y0) * 0.06))
-    cy = min(h - 1, y1 + max(1, int(contact_h * 0.10)))
-    cd.ellipse(
-        (cx - contact_w // 2, cy - contact_h // 2, cx + contact_w // 2, cy + contact_h // 2),
-        fill=(255, 255, 255, int(10 + intensity * 0.28)),
-    )
-    contact = contact.filter(ImageFilter.GaussianBlur(radius=max(8, int(contact_h * 1.6))))
+    cx = x + product.width // 2
+    cw = max(30, int(product.width * 0.72))
+    ch = max(10, int(product.height * 0.055))
+    cy = min(h - 1, y + product.height)
+    cd.ellipse((cx - cw // 2, cy - ch // 2, cx + cw // 2, cy + ch // 2), fill=(0, 0, 0, int(18 + intensity * 0.22)))
+    contact = contact.filter(ImageFilter.GaussianBlur(radius=max(10, int(ch * 1.8))))
     base = Image.alpha_composite(base, contact)
 
-    # Full-surface reflections: broad, soft, edge-free streaks.
-    sheen = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(sheen)
-    highlight_alpha = int(18 + intensity * 0.48)
-    band = max(26, int(w * 0.026))
-    for center in (int(w * 0.16), int(w * 0.76)):
-        draw.polygon(
-            [
-                (center - band * 3, 0),
-                (center - band, 0),
-                (center + band * 3, h),
-                (center + band, h),
-            ],
-            fill=(255, 255, 255, highlight_alpha),
-        )
-    sheen = sheen.filter(ImageFilter.GaussianBlur(radius=max(18, int(w * 0.018))))
-    base = Image.alpha_composite(base, sheen)
+    base = _add_floor_gloss(base, intensity)
 
-    # Slightly brighter lower half makes the whole surface read as acrylic, without a visible border.
+    # A subtle lower-half brightness gives continuous transparent acrylic with no visible edge.
     lift = Image.new("RGBA", (w, h), (255, 255, 255, 0))
-    lift_alpha = np.zeros((h, w), dtype=np.uint8)
-    start = int(h * 0.43)
+    arr = np.zeros((h, w), dtype=np.uint8)
+    start = int(h * 0.46)
     if start < h:
-        vals = np.linspace(0, min(30, 10 + intensity // 2), h - start, dtype=np.uint8)
-        lift_alpha[start:, :] = vals[:, None]
-    lift.putalpha(
-        Image.fromarray(lift_alpha, mode="L").filter(
-            ImageFilter.GaussianBlur(radius=max(6, h // 160))
-        )
-    )
+        arr[start:, :] = np.linspace(0, min(20, 5 + intensity // 4), h - start, dtype=np.uint8)[:, None]
+    lift.putalpha(Image.fromarray(arr, mode="L").filter(ImageFilter.GaussianBlur(radius=max(8, h // 150))))
     return Image.alpha_composite(base, lift)
 
 
 def compose_with_plexiglass(source, *args, plexiglass_enabled=False, plexiglass_intensity=DEFAULT_INTENSITY, **kwargs):
+    # Keep a copy because the wrapped AI compose consumes processing_mode itself.
+    reflection_options = dict(kwargs)
+    if args:
+        names = [
+            "background_path", "logo_path", "canvas_width", "canvas_height", "product_fill", "add_logo",
+            "shadow", "shadow_strength", "cleanup", "edge_expand", "sharpness", "straighten", "auto_settings",
+            "prevent_background_showthrough", "strict_logo_cleanup", "remove_product_logo", "logo_remove_strength"
+        ]
+        for name, value in zip(names, args[1:]):
+            reflection_options.setdefault(name, value)
     result = _ORIGINAL_COMPOSE(source, *args, **kwargs)
-    if plexiglass_enabled:
-        intensity = int(plexiglass_intensity)
-        if intensity < MIN_ENABLED_INTENSITY:
-            intensity = DEFAULT_INTENSITY
-        background_path = kwargs.get("background_path")
-        if background_path is None and args:
-            background_path = args[0]
-        if background_path:
-            result = apply_plexiglass_effect(result, Path(background_path), intensity)
-    return result
+    if not plexiglass_enabled:
+        return result
+
+    intensity = int(plexiglass_intensity)
+    if intensity < MIN_ENABLED_INTENSITY:
+        intensity = DEFAULT_INTENSITY
+    try:
+        product, x, y = _rebuild_product_cutout(source, reflection_options)
+        return apply_plexiglass_from_product(result, product, x, y, intensity)
+    except Exception:
+        # Never break normal photo processing if the optional effect fails.
+        return result
 
 
 def _find_box(root, text):
@@ -196,26 +208,21 @@ def build_with_plexiglass(self):
         if self.plexiglass_enabled.get() and self.plexiglass_intensity_var.get() < MIN_ENABLED_INTENSITY:
             self.plexiglass_intensity_var.set(DEFAULT_INTENSITY)
         if self.plexiglass_enabled.get():
-            self.status.set("Эффект оргстекла включён — отражение 42%")
+            self.status.set("Эффект оргстекла включён — отражение детали + глянец поверхности")
 
     ttk.Checkbutton(
         effect_box,
-        text="Эффект оргстекла — отражение детали на всей поверхности",
+        text="Эффект оргстекла — отражение детали на глянцевой поверхности",
         variable=self.plexiglass_enabled,
         command=on_toggle,
     ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 5))
     self._scale_row(
-        effect_box,
-        1,
-        "Видимость отражения",
-        self.plexiglass_intensity_var,
-        MIN_ENABLED_INTENSITY,
-        70,
-        lambda v: f"{float(v):.0f}%",
+        effect_box, 1, "Видимость отражения", self.plexiglass_intensity_var,
+        MIN_ENABLED_INTENSITY, 75, lambda v: f"{float(v):.0f}%"
     )
     ttk.Label(
         effect_box,
-        text="Как на образце: заметное отражение товара вниз, фон виден, края стекла нет.",
+        text="Эталон: отражается сама деталь, есть мягкий глянец; фирменный фон виден, края стекла нет.",
     ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(3, 0))
 
 
