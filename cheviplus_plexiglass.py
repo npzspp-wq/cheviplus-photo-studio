@@ -28,7 +28,6 @@ _ORIGINAL_RESET_SETTINGS = app.App.reset_settings
 
 
 def _product_mask(final_img: Image.Image, background_path: Path) -> np.ndarray:
-    """Approximate foreground mask by comparing the composed image to its backdrop."""
     w, h = final_img.size
     bg = app.fit_cover(Image.open(background_path).convert("RGB"), (w, h))
     a = np.asarray(final_img.convert("RGB"), dtype=np.int16)
@@ -36,7 +35,6 @@ def _product_mask(final_img: Image.Image, background_path: Path) -> np.ndarray:
     diff = np.max(np.abs(a - b), axis=2)
     mask = diff > 24
 
-    # Ignore outer zones where a custom logo/background interpolation can differ.
     yy, xx = np.ogrid[:h, :w]
     central = (xx > w * 0.08) & (xx < w * 0.92) & (yy > h * 0.10) & (yy < h * 0.82)
     mask &= central
@@ -45,7 +43,6 @@ def _product_mask(final_img: Image.Image, background_path: Path) -> np.ndarray:
     if count:
         sizes = np.bincount(labels.ravel())
         sizes[0] = 0
-        # Keep the largest central component and nearby meaningful components.
         main_id = int(sizes.argmax())
         main = labels == main_id
         distance = ndimage.distance_transform_edt(~main)
@@ -62,7 +59,7 @@ def _product_mask(final_img: Image.Image, background_path: Path) -> np.ndarray:
 
 
 def apply_plexiglass_effect(image: Image.Image, background_path: Path, intensity: int = 25) -> Image.Image:
-    """Add seamless glass reflection without any visible glass edge/border."""
+    """Add a seamless acrylic surface impression without drawing an acrylic edge."""
     intensity = max(0, min(60, int(intensity)))
     if intensity <= 0:
         return image
@@ -82,48 +79,53 @@ def apply_plexiglass_effect(image: Image.Image, background_path: Path, intensity
 
     reflection = foreground.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
     rw, rh = reflection.size
-    # A shorter vertical reflection looks like polished acrylic instead of a mirror.
     reflected_h = max(1, int(rh * 0.72))
     reflection = reflection.resize((rw, reflected_h), Image.Resampling.LANCZOS)
 
     arr = np.asarray(reflection.getchannel("A"), dtype=np.float32)
     fade = np.linspace(0.42, 0.0, reflected_h, dtype=np.float32)[:, None]
-    opacity = (0.20 + intensity / 170.0)
+    opacity = 0.20 + intensity / 170.0
     arr = np.clip(arr * fade * opacity, 0, 255).astype(np.uint8)
-    alpha_ref = Image.fromarray(arr, mode="L").filter(ImageFilter.GaussianBlur(radius=max(0.6, h / 1100)))
+    alpha_ref = Image.fromarray(arr, mode="L").filter(
+        ImageFilter.GaussianBlur(radius=max(0.6, h / 1100))
+    )
     reflection.putalpha(alpha_ref)
 
-    # Begin immediately beneath the detected product; no glass rectangle is drawn.
     paste_y = min(h - 1, y1 - max(1, int(rh * 0.035)))
     max_h = max(0, h - paste_y)
     if max_h > 0:
         reflection = reflection.crop((0, 0, rw, min(reflected_h, max_h)))
         base.alpha_composite(reflection, (x0, paste_y))
 
-    # Broad seamless highlights across the full surface. They never form a frame edge.
+    # Full-surface, broad highlights only; no perimeter, no visible sheet boundary.
     sheen = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(sheen)
     highlight_alpha = int(8 + intensity * 0.28)
     band = max(18, int(w * 0.018))
     for center in (int(w * 0.20), int(w * 0.78)):
-        poly = [
-            (center - band * 3, 0),
-            (center - band, 0),
-            (center + band * 3, h),
-            (center + band, h),
-        ]
-        draw.polygon(poly, fill=(255, 255, 255, highlight_alpha))
+        draw.polygon(
+            [
+                (center - band * 3, 0),
+                (center - band, 0),
+                (center + band * 3, h),
+                (center + band, h),
+            ],
+            fill=(255, 255, 255, highlight_alpha),
+        )
     sheen = sheen.filter(ImageFilter.GaussianBlur(radius=max(12, int(w * 0.012))))
     base = Image.alpha_composite(base, sheen)
 
-    # Very soft lower-surface lift to suggest transparent acrylic across the whole plane.
     lift = Image.new("RGBA", (w, h), (255, 255, 255, 0))
-    la = np.zeros((h, w), dtype=np.uint8)
+    lift_alpha = np.zeros((h, w), dtype=np.uint8)
     start = int(h * 0.48)
     if start < h:
         vals = np.linspace(0, min(18, 4 + intensity // 3), h - start, dtype=np.uint8)
-        la[start:, :] = vals[:, None]
-    lift.putalpha(Image.fromarray(la, mode="L").filter(ImageFilter.GaussianBlur(radius=max(5, h // 180))))
+        lift_alpha[start:, :] = vals[:, None]
+    lift.putalpha(
+        Image.fromarray(lift_alpha, mode="L").filter(
+            ImageFilter.GaussianBlur(radius=max(5, h // 180))
+        )
+    )
     return Image.alpha_composite(base, lift)
 
 
@@ -153,8 +155,8 @@ def _find_box(root, text):
 
 def build_with_plexiglass(self):
     _ORIGINAL_BUILD(self)
-    self.plexiglass_enabled = tk.BooleanVar(value=False)
-    self.plexiglass_intensity_var = tk.IntVar(value=25)
+    self.plexiglass_enabled = tk.BooleanVar(master=self, value=False)
+    self.plexiglass_intensity_var = tk.IntVar(master=self, value=25)
 
     source_box = _find_box(self, "4. Добавить фотографии")
     if source_box is None:
@@ -162,7 +164,6 @@ def build_with_plexiglass(self):
     parent = source_box.master
     effect_box = ttk.LabelFrame(parent, text="4. Эффекты", padding=12)
     effect_box.pack(fill="x", pady=(10, 0), before=source_box)
-    # The original source section becomes number 5 visually.
     try:
         source_box.configure(text="5. Добавить фотографии")
     except Exception:
@@ -174,27 +175,35 @@ def build_with_plexiglass(self):
         variable=self.plexiglass_enabled,
     ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 5))
     self._scale_row(
-        effect_box, 1, "Интенсивность отражения",
-        self.plexiglass_intensity_var, 0, 60,
+        effect_box,
+        1,
+        "Интенсивность отражения",
+        self.plexiglass_intensity_var,
+        0,
+        60,
         lambda v: f"{float(v):.0f}%",
     )
     ttk.Label(
         effect_box,
-        text="Фирменный фон сохраняется. Добавляются только мягкое отражение и бесшовный блик.",
+        text="Фирменный фон сохраняется. Добавляются мягкое отражение и бесшовный блик.",
     ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(3, 0))
 
 
 def current_options_with_plexiglass(self):
     options = _ORIGINAL_CURRENT_OPTIONS(self)
-    options["plexiglass_enabled"] = bool(getattr(self, "plexiglass_enabled", tk.BooleanVar(value=False)).get())
-    options["plexiglass_intensity"] = int(getattr(self, "plexiglass_intensity_var", tk.IntVar(value=25)).get())
+    enabled_var = getattr(self, "plexiglass_enabled", None)
+    intensity_var = getattr(self, "plexiglass_intensity_var", None)
+    options["plexiglass_enabled"] = bool(enabled_var.get()) if enabled_var is not None else False
+    options["plexiglass_intensity"] = int(intensity_var.get()) if intensity_var is not None else 25
     return options
 
 
 def settings_payload_with_plexiglass(self):
     data = _ORIGINAL_SETTINGS_PAYLOAD(self)
-    data["plexiglass_enabled"] = bool(self.plexiglass_enabled.get())
-    data["plexiglass_intensity"] = int(self.plexiglass_intensity_var.get())
+    enabled_var = getattr(self, "plexiglass_enabled", None)
+    intensity_var = getattr(self, "plexiglass_intensity_var", None)
+    data["plexiglass_enabled"] = bool(enabled_var.get()) if enabled_var is not None else False
+    data["plexiglass_intensity"] = int(intensity_var.get()) if intensity_var is not None else 25
     return data
 
 
@@ -213,8 +222,10 @@ def load_settings_with_plexiglass(self):
 
 def reset_settings_with_plexiglass(self):
     _ORIGINAL_RESET_SETTINGS(self)
-    self.plexiglass_enabled.set(False)
-    self.plexiglass_intensity_var.set(25)
+    if hasattr(self, "plexiglass_enabled"):
+        self.plexiglass_enabled.set(False)
+    if hasattr(self, "plexiglass_intensity_var"):
+        self.plexiglass_intensity_var.set(25)
 
 
 def install():
