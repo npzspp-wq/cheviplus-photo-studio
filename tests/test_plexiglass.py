@@ -1,40 +1,51 @@
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import cheviplus_plexiglass as plexi
 
 
-def _sample(tmp_path, size=(1280, 960)):
-    bg = tmp_path / "bg.jpg"
-    Image.new("RGB", size, (230, 230, 230)).save(bg)
-    image = Image.new("RGBA", size, (230, 230, 230, 255))
-    w, h = size
-    for x in range(int(w * 0.35), int(w * 0.65)):
-        for y in range(int(h * 0.30), int(h * 0.65)):
-            image.putpixel((x, y), (80, 90, 100, 255))
-    return bg, image
+def _product(size=(300, 180)):
+    product = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(product)
+    draw.rounded_rectangle((10, 10, size[0] - 10, size[1] - 10), radius=28, fill=(100, 110, 120, 255))
+    draw.ellipse((80, 35, 220, 165), fill=(210, 150, 30, 255))
+    return product
 
 
-def test_plexiglass_keeps_dimensions(tmp_path):
-    bg, image = _sample(tmp_path)
-    out = plexi.apply_plexiglass_effect(image, Path(bg), plexi.DEFAULT_INTENSITY)
+def test_plexiglass_keeps_dimensions():
+    base = Image.new("RGBA", (1280, 960), (235, 235, 235, 255))
+    product = _product()
+    out = plexi.apply_plexiglass_from_product(base, product, 490, 360, plexi.DEFAULT_INTENSITY)
     assert out.size == (1280, 960)
 
 
-def test_zero_intensity_direct_effect_is_noop(tmp_path):
-    bg, image = _sample(tmp_path, (640, 480))
-    out = plexi.apply_plexiglass_effect(image, Path(bg), 0)
-    assert list(out.getdata()) == list(image.getdata())
+def test_zero_intensity_direct_effect_is_noop():
+    base = Image.new("RGBA", (640, 480), (240, 240, 240, 255))
+    product = _product((180, 110))
+    out = plexi.apply_plexiglass_from_product(base, product, 230, 180, 0)
+    assert list(out.getdata()) == list(base.getdata())
 
 
-def test_enabled_zero_is_promoted_to_visible_default(monkeypatch, tmp_path):
-    bg, image = _sample(tmp_path, (640, 480))
-    monkeypatch.setattr(plexi, "_ORIGINAL_COMPOSE", lambda *args, **kwargs: image.copy())
+def test_visible_reflection_changes_pixels_below_product():
+    base = Image.new("RGBA", (640, 480), (240, 240, 240, 255))
+    product = _product((180, 110))
+    x, y = 230, 180
+    out = plexi.apply_plexiglass_from_product(base, product, x, y, 45)
+    contact_y = y + product.height + 20
+    assert out.getpixel((x + product.width // 2, contact_y)) != base.getpixel((x + product.width // 2, contact_y))
+
+
+def test_enabled_zero_is_promoted_to_visible_default(monkeypatch):
+    base = Image.new("RGBA", (640, 480), (240, 240, 240, 255))
+    product = _product((180, 110))
+    monkeypatch.setattr(plexi, "_ORIGINAL_COMPOSE", lambda *args, **kwargs: base.copy())
+    monkeypatch.setattr(plexi, "_rebuild_product_cutout", lambda source, options: (product, 230, 180))
     out = plexi.compose_with_plexiglass(
         Path("sample.jpg"),
-        background_path=Path(bg),
         plexiglass_enabled=True,
         plexiglass_intensity=0,
+        canvas_width=640,
+        canvas_height=480,
     )
-    assert list(out.getdata()) != list(image.getdata())
+    assert list(out.getdata()) != list(base.getdata())
