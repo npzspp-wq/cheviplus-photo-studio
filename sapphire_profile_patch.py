@@ -1,9 +1,15 @@
-"""Sapphire branding and approved 1C export profile for the 5.9 application."""
+"""Sapphire branding and confirmed 1C export profile.
+
+The 1C profile is based on a real JPEG accepted by the user's 1C photo loader:
+1280x960 pixels, 4:3, RGB JPEG.  Do not impose the obsolete 100 KB target because
+the accepted reference is about 194 KB.
+"""
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import app
 
 SAPPHIRE_BG = app.APP_DIR / "sapphire_background.png"
+ONE_C_PROFILE = "1С — 1280×960, 4:3, JPG (проверено)"
 
 
 def _font(size: int, bold: bool = True):
@@ -42,14 +48,65 @@ def ensure_sapphire_background(path: Path = SAPPHIRE_BG):
     return path
 
 
+def _force_confirmed_1c_defaults(self):
+    """Keep old saved 1C presets from restoring incompatible dimensions."""
+    old_load_settings(self)
+    profile = self.profile_var.get()
+    obsolete = profile.startswith("1С — 1024×685") or profile.startswith("1С — 1024×768")
+    if obsolete:
+        self.profile_var.set(ONE_C_PROFILE)
+        self.width_var.set("1280")
+        self.height_var.set("960")
+        self.format_var.set("JPG")
+        self.target_kb_var.set("0")
+        self.jpeg_quality_var.set("90")
+
+
+def _confirmed_reset(self):
+    old_reset_settings(self)
+    self.profile_var.set(ONE_C_PROFILE)
+    self.width_var.set("1280")
+    self.height_var.set("960")
+    self.format_var.set("JPG")
+    self.target_kb_var.set("0")
+    self.jpeg_quality_var.set("90")
+
+
 def apply():
-    # Replace the obsolete 1024x685 preset with the approved true 4:3 1C standard.
-    app.EXPORT_PROFILES.pop("1С — 1024×685, JPG до 100 КБ",None)
-    profile_name="1С — 1024×768, 4:3, JPG"
-    app.EXPORT_PROFILES={
-        profile_name:{"width":1024,"height":768,"format":"JPG","target_kb":0,"quality":90},
+    # Remove every obsolete 1C profile and make the accepted 1280x960 profile first.
+    for name in list(app.EXPORT_PROFILES):
+        if name.startswith("1С —"):
+            app.EXPORT_PROFILES.pop(name, None)
+    app.EXPORT_PROFILES = {
+        ONE_C_PROFILE: {
+            "width": 1280,
+            "height": 960,
+            "format": "JPG",
+            "target_kb": 0,
+            "quality": 90,
+        },
         **app.EXPORT_PROFILES,
     }
+
+    # New installations start directly with the confirmed 1C settings.
+    original_build = app.App._build
+    def build_with_1c_defaults(self):
+        original_build(self)
+        self.profile_var.set(ONE_C_PROFILE)
+        self.width_var.set("1280")
+        self.height_var.set("960")
+        self.format_var.set("JPG")
+        self.target_kb_var.set("0")
+        self.jpeg_quality_var.set("90")
+    app.App._build = build_with_1c_defaults
+
+    # Existing settings created by old builds are migrated automatically.
+    global old_load_settings, old_reset_settings
+    old_load_settings = app.App.load_settings
+    old_reset_settings = app.App.reset_settings
+    app.App.load_settings = _force_confirmed_1c_defaults
+    app.App.reset_settings = _confirmed_reset
+
     bg=ensure_sapphire_background()
     app.DEFAULT_BACKGROUND_NAMES["Фон 3 — Сапфир"]=bg
     app.BUILTIN_BACKGROUNDS=app.discover_backgrounds()
