@@ -1,0 +1,231 @@
+"""Seamless full-surface plexiglass effect for Cheviplus Photo Studio.
+
+The effect is intentionally edge-free: it does not draw a visible glass rectangle.
+It adds only a soft product reflection, contact depth and broad low-opacity light
+streaks over the whole branded surface.
+"""
+from __future__ import annotations
+
+import tkinter as tk
+from tkinter import ttk
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
+from scipy import ndimage
+
+import app
+
+APP_VERSION = "5.15"
+APP_BUILD = "2026.08.17.02"
+
+_ORIGINAL_COMPOSE = app.compose_image
+_ORIGINAL_BUILD = app.App._build
+_ORIGINAL_CURRENT_OPTIONS = app.App.current_options
+_ORIGINAL_SETTINGS_PAYLOAD = app.App.settings_payload
+_ORIGINAL_LOAD_SETTINGS = app.App.load_settings
+_ORIGINAL_RESET_SETTINGS = app.App.reset_settings
+
+
+def _product_mask(final_img: Image.Image, background_path: Path) -> np.ndarray:
+    """Approximate foreground mask by comparing the composed image to its backdrop."""
+    w, h = final_img.size
+    bg = app.fit_cover(Image.open(background_path).convert("RGB"), (w, h))
+    a = np.asarray(final_img.convert("RGB"), dtype=np.int16)
+    b = np.asarray(bg, dtype=np.int16)
+    diff = np.max(np.abs(a - b), axis=2)
+    mask = diff > 24
+
+    # Ignore outer zones where a custom logo/background interpolation can differ.
+    yy, xx = np.ogrid[:h, :w]
+    central = (xx > w * 0.08) & (xx < w * 0.92) & (yy > h * 0.10) & (yy < h * 0.82)
+    mask &= central
+    mask = ndimage.binary_closing(mask, iterations=2)
+    labels, count = ndimage.label(mask)
+    if count:
+        sizes = np.bincount(labels.ravel())
+        sizes[0] = 0
+        # Keep the largest central component and nearby meaningful components.
+        main_id = int(sizes.argmax())
+        main = labels == main_id
+        distance = ndimage.distance_transform_edt(~main)
+        keep = main.copy()
+        main_size = max(1, int(sizes[main_id]))
+        for idx in range(1, count + 1):
+            if idx == main_id or sizes[idx] <= 0:
+                continue
+            comp = labels == idx
+            if sizes[idx] >= main_size * 0.02 and float(distance[comp].min()) < max(18, min(w, h) * 0.04):
+                keep |= comp
+        mask = keep
+    return mask
+
+
+def apply_plexiglass_effect(image: Image.Image, background_path: Path, intensity: int = 25) -> Image.Image:
+    """Add seamless glass reflection without any visible glass edge/border."""
+    intensity = max(0, min(60, int(intensity)))
+    if intensity <= 0:
+        return image
+
+    base = image.convert("RGBA")
+    w, h = base.size
+    mask = _product_mask(base, Path(background_path))
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 100:
+        return base
+
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    foreground = base.crop((x0, y0, x1, y1)).copy()
+    alpha = Image.fromarray((mask[y0:y1, x0:x1] * 255).astype(np.uint8), mode="L")
+    foreground.putalpha(alpha)
+
+    reflection = foreground.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+    rw, rh = reflection.size
+    # A shorter vertical reflection looks like polished acrylic instead of a mirror.
+    reflected_h = max(1, int(rh * 0.72))
+    reflection = reflection.resize((rw, reflected_h), Image.Resampling.LANCZOS)
+
+    arr = np.asarray(reflection.getchannel("A"), dtype=np.float32)
+    fade = np.linspace(0.42, 0.0, reflected_h, dtype=np.float32)[:, None]
+    opacity = (0.20 + intensity / 170.0)
+    arr = np.clip(arr * fade * opacity, 0, 255).astype(np.uint8)
+    alpha_ref = Image.fromarray(arr, mode="L").filter(ImageFilter.GaussianBlur(radius=max(0.6, h / 1100)))
+    reflection.putalpha(alpha_ref)
+
+    # Begin immediately beneath the detected product; no glass rectangle is drawn.
+    paste_y = min(h - 1, y1 - max(1, int(rh * 0.035)))
+    max_h = max(0, h - paste_y)
+    if max_h > 0:
+        reflection = reflection.crop((0, 0, rw, min(reflected_h, max_h)))
+        base.alpha_composite(reflection, (x0, paste_y))
+
+    # Broad seamless highlights across the full surface. They never form a frame edge.
+    sheen = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(sheen)
+    highlight_alpha = int(8 + intensity * 0.28)
+    band = max(18, int(w * 0.018))
+    for center in (int(w * 0.20), int(w * 0.78)):
+        poly = [
+            (center - band * 3, 0),
+            (center - band, 0),
+            (center + band * 3, h),
+            (center + band, h),
+        ]
+        draw.polygon(poly, fill=(255, 255, 255, highlight_alpha))
+    sheen = sheen.filter(ImageFilter.GaussianBlur(radius=max(12, int(w * 0.012))))
+    base = Image.alpha_composite(base, sheen)
+
+    # Very soft lower-surface lift to suggest transparent acrylic across the whole plane.
+    lift = Image.new("RGBA", (w, h), (255, 255, 255, 0))
+    la = np.zeros((h, w), dtype=np.uint8)
+    start = int(h * 0.48)
+    if start < h:
+        vals = np.linspace(0, min(18, 4 + intensity // 3), h - start, dtype=np.uint8)
+        la[start:, :] = vals[:, None]
+    lift.putalpha(Image.fromarray(la, mode="L").filter(ImageFilter.GaussianBlur(radius=max(5, h // 180))))
+    return Image.alpha_composite(base, lift)
+
+
+def compose_with_plexiglass(source, *args, plexiglass_enabled=False, plexiglass_intensity=25, **kwargs):
+    result = _ORIGINAL_COMPOSE(source, *args, **kwargs)
+    if plexiglass_enabled:
+        background_path = kwargs.get("background_path")
+        if background_path is None and args:
+            background_path = args[0]
+        if background_path:
+            result = apply_plexiglass_effect(result, Path(background_path), plexiglass_intensity)
+    return result
+
+
+def _find_box(root, text):
+    for widget in root.winfo_children():
+        try:
+            if isinstance(widget, ttk.LabelFrame) and widget.cget("text") == text:
+                return widget
+        except Exception:
+            pass
+        found = _find_box(widget, text)
+        if found is not None:
+            return found
+    return None
+
+
+def build_with_plexiglass(self):
+    _ORIGINAL_BUILD(self)
+    self.plexiglass_enabled = tk.BooleanVar(value=False)
+    self.plexiglass_intensity_var = tk.IntVar(value=25)
+
+    source_box = _find_box(self, "4. Добавить фотографии")
+    if source_box is None:
+        return
+    parent = source_box.master
+    effect_box = ttk.LabelFrame(parent, text="4. Эффекты", padding=12)
+    effect_box.pack(fill="x", pady=(10, 0), before=source_box)
+    # The original source section becomes number 5 visually.
+    try:
+        source_box.configure(text="5. Добавить фотографии")
+    except Exception:
+        pass
+
+    ttk.Checkbutton(
+        effect_box,
+        text="Эффект оргстекла — по всей поверхности, без видимого края",
+        variable=self.plexiglass_enabled,
+    ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 5))
+    self._scale_row(
+        effect_box, 1, "Интенсивность отражения",
+        self.plexiglass_intensity_var, 0, 60,
+        lambda v: f"{float(v):.0f}%",
+    )
+    ttk.Label(
+        effect_box,
+        text="Фирменный фон сохраняется. Добавляются только мягкое отражение и бесшовный блик.",
+    ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(3, 0))
+
+
+def current_options_with_plexiglass(self):
+    options = _ORIGINAL_CURRENT_OPTIONS(self)
+    options["plexiglass_enabled"] = bool(getattr(self, "plexiglass_enabled", tk.BooleanVar(value=False)).get())
+    options["plexiglass_intensity"] = int(getattr(self, "plexiglass_intensity_var", tk.IntVar(value=25)).get())
+    return options
+
+
+def settings_payload_with_plexiglass(self):
+    data = _ORIGINAL_SETTINGS_PAYLOAD(self)
+    data["plexiglass_enabled"] = bool(self.plexiglass_enabled.get())
+    data["plexiglass_intensity"] = int(self.plexiglass_intensity_var.get())
+    return data
+
+
+def load_settings_with_plexiglass(self):
+    _ORIGINAL_LOAD_SETTINGS(self)
+    if not app.SETTINGS_FILE.exists():
+        return
+    try:
+        import json
+        data = json.loads(app.SETTINGS_FILE.read_text(encoding="utf-8"))
+        self.plexiglass_enabled.set(bool(data.get("plexiglass_enabled", False)))
+        self.plexiglass_intensity_var.set(int(data.get("plexiglass_intensity", 25)))
+    except Exception:
+        pass
+
+
+def reset_settings_with_plexiglass(self):
+    _ORIGINAL_RESET_SETTINGS(self)
+    self.plexiglass_enabled.set(False)
+    self.plexiglass_intensity_var.set(25)
+
+
+def install():
+    app.compose_image = compose_with_plexiglass
+    app.App._build = build_with_plexiglass
+    app.App.current_options = current_options_with_plexiglass
+    app.App.settings_payload = settings_payload_with_plexiglass
+    app.App.load_settings = load_settings_with_plexiglass
+    app.App.reset_settings = reset_settings_with_plexiglass
+    app.APP_VERSION = APP_VERSION
+    app.APP_BUILD = APP_BUILD
+
+
+install()
