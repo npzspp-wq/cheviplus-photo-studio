@@ -1,8 +1,7 @@
 """Refined virtual acrylic-table placement for Cheviplus Photo Studio.
 
 Adds automatic support-based placement plus an optional manual vertical offset.
-The user can move the product up/down on the virtual acrylic table without
-changing background removal or export settings.
+The normal "Масштаб товара" control now also applies to the acrylic-table mode.
 """
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ import app
 import cheviplus_plexiglass as plexi
 
 APP_VERSION = "5.15"
-APP_BUILD = "2026.08.18.03"
+APP_BUILD = "2026.08.18.04"
 
 _ORIGINAL_REBUILD = plexi._rebuild_product_cutout
 _ORIGINAL_BUILD = app.App._build
@@ -41,7 +40,12 @@ def _support_row(product: Image.Image) -> int:
     return int(rows[idx])
 
 
-def _scale_for_table(product: Image.Image, cw: int, ch: int):
+def _scale_for_table(product: Image.Image, cw: int, ch: int, product_fill: float = 0.86):
+    """Size for table while respecting the user's existing product-scale slider.
+
+    86% is the historical/default scale. Values below/above it shrink/enlarge
+    the table product proportionally, while safety caps prevent clipping.
+    """
     aspect = product.width / max(1, product.height)
     if aspect >= 3.0:
         max_w, max_h = cw * 0.90, ch * 0.34
@@ -55,7 +59,12 @@ def _scale_for_table(product: Image.Image, cw: int, ch: int):
     else:
         max_w, max_h = cw * 0.70, ch * 0.56
         contact = ch * 0.69
-    ratio = min(max_w / max(1, product.width), max_h / max(1, product.height))
+
+    fill = max(0.60, min(0.94, float(product_fill)))
+    scale_factor = fill / 0.86
+    target_w = min(cw * 0.94, max_w * scale_factor)
+    target_h = min(ch * 0.68, max_h * scale_factor)
+    ratio = min(target_w / max(1, product.width), target_h / max(1, product.height))
     size = (max(1, int(product.width * ratio)), max(1, int(product.height * ratio)))
     return product.resize(size, Image.Resampling.LANCZOS), int(contact)
 
@@ -67,18 +76,17 @@ def rebuild_product_for_table(source, options, table_mode=False):
 
     cw = int(options.get("canvas_width", 1280))
     ch = int(options.get("canvas_height", 960))
-    product, contact_y = _scale_for_table(product, cw, ch)
+    product_fill = float(options.get("product_fill", 0.86))
+    product, contact_y = _scale_for_table(product, cw, ch, product_fill)
     support = _support_row(product)
 
     x = (cw - product.width) // 2
     y = contact_y - support
 
-    # Optional manual correction. Positive values move DOWN, negative move UP.
     if options.get("table_manual_position", False):
         offset_pct = max(-25, min(25, int(options.get("table_vertical_offset", 0))))
         y += int(ch * offset_pct / 100.0)
 
-    # Still prevent accidental clipping when manually positioning.
     y = max(-int(product.height * 0.08), min(y, ch - int(product.height * 0.20)))
     x = max(int(cw * 0.035), min(x, int(cw * 0.965) - product.width))
     return product, x, y
@@ -97,9 +105,7 @@ def short_reflection_layer(product, canvas_size, x, y, intensity):
     fade = np.linspace(0.48, 0.0, target_h, dtype=np.float32)[:, None]
     strength = 0.38 + max(15, min(75, int(intensity))) / 210.0
     alpha = np.clip(alpha * fade * strength, 0, 255).astype(np.uint8)
-    reflection.putalpha(
-        Image.fromarray(alpha, "L").filter(ImageFilter.GaussianBlur(radius=max(0.8, h / 900)))
-    )
+    reflection.putalpha(Image.fromarray(alpha, "L").filter(ImageFilter.GaussianBlur(radius=max(0.8, h / 900))))
 
     contact_y = y + support
     paste_y = max(0, min(h - 1, contact_y + 1))
@@ -158,25 +164,9 @@ def build_with_manual_position(self):
         return
 
     ttk.Separator(effect_box, orient="horizontal").grid(row=3, column=0, columnspan=6, sticky="ew", pady=(8, 6))
-    ttk.Checkbutton(
-        effect_box,
-        text="Ручное положение товара на столе",
-        variable=self.table_manual_position,
-    ).grid(row=4, column=0, columnspan=6, sticky="w")
-
-    self._scale_row(
-        effect_box,
-        5,
-        "Положение вверх / вниз",
-        self.table_vertical_offset,
-        -25,
-        25,
-        lambda v: f"{float(v):+.0f}%",
-    )
-    ttk.Label(
-        effect_box,
-        text="− вверх   •   0 автоматически   •   + вниз. После изменения нажмите «ПРЕДПРОСМОТР».",
-    ).grid(row=6, column=0, columnspan=6, sticky="w", pady=(3, 0))
+    ttk.Checkbutton(effect_box, text="Ручное положение товара на столе", variable=self.table_manual_position).grid(row=4, column=0, columnspan=6, sticky="w")
+    self._scale_row(effect_box, 5, "Положение вверх / вниз", self.table_vertical_offset, -25, 25, lambda v: f"{float(v):+.0f}%")
+    ttk.Label(effect_box, text="− вверх   •   0 автоматически   •   + вниз. После изменения нажмите «ПРЕДПРОСМОТР».").grid(row=6, column=0, columnspan=6, sticky="w", pady=(3, 0))
 
 
 def current_options_with_manual_position(self):
