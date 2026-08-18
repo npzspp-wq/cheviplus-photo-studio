@@ -30,7 +30,7 @@ jobs:
         run: python tools/build_brand_assets.py
       - name: Run compile and stability checks
         run: |
-          python -m compileall app.py launcher.py sapphire_profile_patch.py cheviplus_stability_patch.py cheviplus_product_cutout.py cheviplus_backdrop_quality.py cheviplus_ai_quality.py cheviplus_workstation_stats.py cheviplus_license.py cheviplus_license_registry.py cheviplus_license_renewal.py cheviplus_update_support.py cheviplus_plexiglass.py cheviplus_table_placement_patch.py tools/build_brand_assets.py
+          python -m compileall app.py launcher.py sapphire_profile_patch.py cheviplus_stability_patch.py cheviplus_product_cutout.py cheviplus_backdrop_quality.py cheviplus_ai_quality.py cheviplus_workstation_stats.py cheviplus_license.py cheviplus_license_registry.py cheviplus_license_renewal.py cheviplus_update_support.py cheviplus_plexiglass.py cheviplus_table_placement_patch.py cheviplus_compose_compat_patch.py tools/build_brand_assets.py
           python tools/audit_static.py
           python -m unittest discover -s tests -p "test_*.py"
 
