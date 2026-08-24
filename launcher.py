@@ -12,14 +12,15 @@ import cheviplus_marketplace_cards as marketplace_cards  # noqa: F401
 import cheviplus_marketplace_clipboard_patch as marketplace_clipboard  # noqa: F401
 import cheviplus_marketplace_editor as marketplace_editor  # noqa: F401
 import cheviplus_marketplace_templates as marketplace_templates  # noqa: F401
+import cheviplus_photo_picker_fix as photo_picker_fix  # noqa: F401
 from cheviplus_update_support import prepare_upgrade_environment
 
-renewal.APP_VERSION = marketplace_templates.APP_VERSION
-renewal.APP_BUILD = marketplace_templates.APP_BUILD
-renewal.app.APP_VERSION = marketplace_templates.APP_VERSION
-renewal.app.APP_BUILD = marketplace_templates.APP_BUILD
+renewal.APP_VERSION = photo_picker_fix.APP_VERSION
+renewal.APP_BUILD = photo_picker_fix.APP_BUILD
+renewal.app.APP_VERSION = photo_picker_fix.APP_VERSION
+renewal.app.APP_BUILD = photo_picker_fix.APP_BUILD
 
 
 if __name__ == "__main__":
-    prepare_upgrade_environment(marketplace_templates.APP_VERSION)
+    prepare_upgrade_environment(photo_picker_fix.APP_VERSION)
     AdminRegistryApp().mainloop()
