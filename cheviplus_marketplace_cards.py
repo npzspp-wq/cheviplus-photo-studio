@@ -1,4 +1,4 @@
-"""Ozon marketplace cards: create only useful customer-facing cards."""
+"""Ozon marketplace cards with real product photo and useful catalog data."""
 from __future__ import annotations
 
 import re
@@ -10,8 +10,8 @@ from PIL import Image, ImageDraw, ImageFont
 import app
 import cheviplus_marketplace_catalog as catalog
 
-APP_VERSION = "5.19"
-APP_BUILD = "2026.08.24.06"
+APP_VERSION = "5.20"
+APP_BUILD = "2026.08.24.07"
 CARD_SIZE = (1200, 1600)
 _ORIGINAL_BUILD = app.App._build
 
@@ -76,7 +76,7 @@ def _brand_header(draw):
     draw.text((70, 117), "MARKETPLACE", font=_font(25), fill=(188, 193, 201))
 
 
-def _draw_title(draw, text, y=245, max_lines=4, size=61):
+def _draw_title(draw, text, y=230, max_lines=4, size=57):
     font = _font(size, True)
     for line in _wrap(draw, text.upper(), font, 1060, max_lines):
         draw.text((70, y), line, font=font, fill=(26, 29, 34))
@@ -84,52 +84,73 @@ def _draw_title(draw, text, y=245, max_lines=4, size=61):
     return y
 
 
-def build_card_main(product):
+def _fit_photo(photo: Image.Image, box):
+    x0, y0, x1, y1 = box
+    image = photo.convert("RGB")
+    bw, bh = x1 - x0, y1 - y0
+    ratio = min(bw / max(1, image.width), bh / max(1, image.height))
+    size = (max(1, int(image.width * ratio)), max(1, int(image.height * ratio)))
+    image = image.resize(size, Image.Resampling.LANCZOS)
+    x = x0 + (bw - image.width) // 2
+    y = y0 + (bh - image.height) // 2
+    return image, (x, y)
+
+
+def build_card_main(photo, product):
     img = _base_card()
     draw = ImageDraw.Draw(img)
     _brand_header(draw)
     y = _draw_title(draw, _product_name(product))
     article = _article(product)
     if article:
-        draw.rounded_rectangle((70, y + 25, 545, y + 102), radius=20, fill=(229, 35, 42))
-        draw.text((98, y + 43), f"АРТИКУЛ {article}", font=_font(31, True), fill="white")
+        draw.rounded_rectangle((70, y + 20, 545, y + 95), radius=20, fill=(229, 35, 42))
+        draw.text((98, y + 38), f"АРТИКУЛ {article}", font=_font(31, True), fill="white")
+        photo_top = y + 135
+    else:
+        photo_top = y + 55
+    fitted, pos = _fit_photo(photo, (90, photo_top, 1110, 1480))
+    img.paste(fitted, pos)
     return img
 
 
-def build_card_applicability(product):
+def build_card_applicability(photo, product):
     img = _base_card()
     draw = ImageDraw.Draw(img)
     _brand_header(draw)
-    draw.text((70, 235), "ПРИМЕНЯЕМОСТЬ", font=_font(70, True), fill=(26, 29, 34))
+    draw.text((70, 225), "ПРИМЕНЯЕМОСТЬ", font=_font(68, True), fill=(26, 29, 34))
 
     apps = _apps(product)
-    y = 385
+    y = 360
     if len(apps) == 1:
-        draw.rounded_rectangle((70, y, 1130, y + 205), radius=28, fill=(255, 255, 255), outline=(214, 217, 222), width=2)
-        ty = y + 48
-        for line in _wrap(draw, apps[0], _font(49, True), 950, 3):
-            draw.text((115, ty), line, font=_font(49, True), fill=(35, 39, 45))
-            ty += 61
+        draw.rounded_rectangle((70, y, 1130, y + 185), radius=28, fill=(255, 255, 255), outline=(214, 217, 222), width=2)
+        ty = y + 42
+        for line in _wrap(draw, apps[0], _font(47, True), 950, 3):
+            draw.text((115, ty), line, font=_font(47, True), fill=(35, 39, 45))
+            ty += 58
+        photo_top = y + 235
     else:
-        for idx, line in enumerate(apps[:7], start=1):
-            draw.rounded_rectangle((70, y, 1130, y + 120), radius=24, fill=(255, 255, 255), outline=(214, 217, 222), width=2)
-            draw.ellipse((98, y + 35, 148, y + 85), fill=(229, 35, 42))
-            draw.text((113, y + 40), str(idx), font=_font(24, True), fill="white")
-            ty = y + 25
-            for wrapped in _wrap(draw, line, _font(36, True), 900, 2):
-                draw.text((180, ty), wrapped, font=_font(36, True), fill=(40, 44, 50))
-                ty += 44
-            y += 142
-        if len(apps) > 7:
-            draw.text((70, y + 10), f"Ещё вариантов: {len(apps) - 7}", font=_font(30, True), fill=(105, 110, 118))
+        for idx, line in enumerate(apps[:5], start=1):
+            draw.rounded_rectangle((70, y, 1130, y + 108), radius=22, fill=(255, 255, 255), outline=(214, 217, 222), width=2)
+            draw.ellipse((98, y + 30, 146, y + 78), fill=(229, 35, 42))
+            draw.text((112, y + 34), str(idx), font=_font(23, True), fill="white")
+            ty = y + 20
+            for wrapped in _wrap(draw, line, _font(33, True), 900, 2):
+                draw.text((178, ty), wrapped, font=_font(33, True), fill=(40, 44, 50))
+                ty += 40
+            y += 125
+        photo_top = min(y + 35, 1040)
+
+    fitted, pos = _fit_photo(photo, (110, photo_top, 1090, 1480))
+    img.paste(fitted, pos)
     return img
 
 
-def generate_cards(product: dict, out_dir: Path):
+def generate_cards(photo_path: Path, product: dict, out_dir: Path):
+    photo = Image.open(photo_path).convert("RGB")
     out_dir.mkdir(parents=True, exist_ok=True)
-    cards = [("01_OZON_MAIN.jpg", build_card_main(product))]
+    cards = [("01_OZON_MAIN.jpg", build_card_main(photo, product))]
     if _apps(product):
-        cards.append(("02_OZON_APPLICABILITY.jpg", build_card_applicability(product)))
+        cards.append(("02_OZON_APPLICABILITY.jpg", build_card_applicability(photo, product)))
     result = []
     for name, image in cards:
         path = out_dir / name
@@ -159,7 +180,7 @@ def build_cards_ui(self):
     row = ttk.Frame(box)
     row.pack(fill="x", pady=(10, 0))
     ttk.Button(row, text="СОЗДАТЬ КАРТОЧКИ OZON", command=self._marketplace_create_ozon_cards).pack(side="left")
-    ttk.Label(row, text="Карточки 1200×1600 • только полезные данные из базы").pack(side="left", padx=10)
+    ttk.Label(row, text="2 карточки 1200×1600 • реальное фото + полезные данные").pack(side="left", padx=10)
 
 
 def create_ozon_cards(self):
@@ -167,13 +188,22 @@ def create_ozon_cards(self):
     if not product:
         messagebox.showwarning("Ozon", "Сначала найдите товар по артикулу или коду.")
         return
+
+    photo = filedialog.askopenfilename(
+        title="Выберите реальное фото товара",
+        filetypes=[("Изображения", "*.jpg *.jpeg *.png *.webp")],
+    )
+    if not photo:
+        return
+
     out_parent = filedialog.askdirectory(title="Куда сохранить карточки Ozon?")
     if not out_parent:
         return
+
     default_name = catalog.normalize_key(_article(product) or "OZON") or "OZON"
     out_dir = Path(out_parent) / f"OZON_{default_name}"
     try:
-        files = generate_cards(product, out_dir)
+        files = generate_cards(Path(photo), product, out_dir)
     except Exception as exc:
         messagebox.showerror("Ozon", f"Не удалось создать карточки:\n{exc}")
         return
