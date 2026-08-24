@@ -1,5 +1,5 @@
 #define MyAppName "Cheviplus Photo Studio"
-#define MyAppVersion "5.24"
+#define MyAppVersion "5.26"
 #define MyAppPublisher "Cheviplus"
 #define MyAppExeName "Cheviplus Photo Studio.exe"
 
