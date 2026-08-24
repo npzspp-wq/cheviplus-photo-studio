@@ -7,6 +7,7 @@ product plus consolidated vehicle applicability. No Internet or AI is required.
 from __future__ import annotations
 
 import json
+import queue
 import re
 import sqlite3
 import threading
@@ -17,7 +18,7 @@ from tkinter import ttk, filedialog, messagebox
 import app
 
 APP_VERSION = "5.16"
-APP_BUILD = "2026.08.24.01"
+APP_BUILD = "2026.08.24.02"
 CATALOG_DIR = app.APP_DIR / "marketplace_data"
 CATALOG_DB = CATALOG_DIR / "catalog.sqlite3"
 CATALOG_META = CATALOG_DIR / "catalog_meta.json"
@@ -44,25 +45,41 @@ def clean_text(value) -> str:
     return text
 
 
+def _normalize_header(value) -> str:
+    return re.sub(r"[^a-zа-я0-9]", "", str(value or "").strip().lower().replace("ё", "е"))
+
+
 def _header_map(row):
-    result = {}
     aliases = {
         "nomenclature": {"номенклатура", "наименование", "товар", "название"},
-        "code": {"код", "код номенклатуры"},
-        "article": {"артикул", "каталожный номер", "номер", "номер детали"},
-        "brand": {"марка", "бренд авто"},
-        "model": {"модель"},
-        "model_year": {"модельный год", "модельныйгод"},
+        "code": {"код", "кодноменклатуры", "номенклатуракод"},
+        "article": {"артикул", "каталожныйномер", "номер", "номердетали", "номенклатураартикул"},
+        "brand": {"марка", "брендавто", "марканименованиеполное", "марканименование"},
+        "model": {"модель", "модельнаименованиеполное", "модельнаименование"},
+        "model_year": {"модельныйгод", "годмодели"},
         "comment": {"комментарий", "примечание"},
         "years": {"года", "годы", "период"},
     }
-    normalized = [str(v or "").strip().lower().replace("ё", "е") for v in row]
+    normalized = [_normalize_header(v) for v in row]
+    result = {}
     for field, names in aliases.items():
         for idx, value in enumerate(normalized):
-            if value in {n.replace("ё", "е") for n in names}:
+            if value in names:
                 result[field] = idx
                 break
     return result
+
+
+def _find_header(iterator, max_rows=25):
+    for _ in range(max_rows):
+        try:
+            row = next(iterator)
+        except StopIteration:
+            return None, None
+        mapping = _header_map(row)
+        if ("article" in mapping or "code" in mapping) and "nomenclature" in mapping:
+            return row, mapping
+    return None, None
 
 
 def _cell(row, mapping, field):
@@ -73,7 +90,6 @@ def _cell(row, mapping, field):
 
 
 def import_excel_to_sqlite(xlsx_path: Path, progress=None) -> dict:
-    """Stream XLSX rows into SQLite. Designed for 100k+ rows without huge RAM use."""
     from openpyxl import load_workbook
 
     CATALOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -103,24 +119,17 @@ def import_excel_to_sqlite(xlsx_path: Path, progress=None) -> dict:
         )
 
         wb = load_workbook(xlsx_path, read_only=True, data_only=True)
-        total_rows = 0
         imported = 0
         skipped = 0
         sheets_used = 0
-
         for ws in wb.worksheets:
             iterator = ws.iter_rows(values_only=True)
-            try:
-                header = next(iterator)
-            except StopIteration:
-                continue
-            mapping = _header_map(header)
-            if "article" not in mapping and "code" not in mapping:
+            _header, mapping = _find_header(iterator)
+            if not mapping:
                 continue
             sheets_used += 1
             batch = []
             for row in iterator:
-                total_rows += 1
                 article = _cell(row, mapping, "article")
                 code = _cell(row, mapping, "code")
                 article_norm = normalize_key(article)
@@ -137,7 +146,7 @@ def import_excel_to_sqlite(xlsx_path: Path, progress=None) -> dict:
                     _cell(row, mapping, "comment"),
                     _cell(row, mapping, "years"),
                 ))
-                if len(batch) >= 2000:
+                if len(batch) >= 2500:
                     conn.executemany(
                         "INSERT INTO product_rows(article_norm,article,code_norm,code,nomenclature,brand,model,model_year,comment,years) VALUES (?,?,?,?,?,?,?,?,?,?)",
                         batch,
@@ -152,6 +161,13 @@ def import_excel_to_sqlite(xlsx_path: Path, progress=None) -> dict:
                     batch,
                 )
                 imported += len(batch)
+                if progress:
+                    progress(imported)
+
+        if not sheets_used:
+            raise ValueError("Не найдена таблица с колонками Номенклатура/Артикул/Код. Проверьте структуру Excel.")
+        if not imported:
+            raise ValueError("В Excel не найдено строк с артикулами или кодами.")
 
         conn.execute("CREATE INDEX idx_article_norm ON product_rows(article_norm)")
         conn.execute("CREATE INDEX idx_code_norm ON product_rows(code_norm)")
@@ -164,7 +180,6 @@ def import_excel_to_sqlite(xlsx_path: Path, progress=None) -> dict:
     if CATALOG_DB.exists():
         CATALOG_DB.unlink()
     temp_db.replace(CATALOG_DB)
-
     metadata = {
         "source_name": xlsx_path.name,
         "source_path": str(xlsx_path),
@@ -204,31 +219,29 @@ def lookup_product(query: str) -> dict | None:
     if not rows:
         return None
 
-    # Choose the most common non-empty name/article/code and consolidate applicability.
     def most_common(field):
         counts = {}
         for r in rows:
-            v = clean_text(r[field])
-            if v:
-                counts[v] = counts.get(v, 0) + 1
+            value = clean_text(r[field])
+            if value:
+                counts[value] = counts.get(value, 0) + 1
         return max(counts, key=counts.get) if counts else ""
 
     applicability = []
     seen = set()
     for r in rows:
-        parts = [clean_text(r["brand"]), clean_text(r["model"])]
-        vehicle = " ".join(p for p in parts if p).strip()
+        vehicle = " ".join(p for p in (clean_text(r["brand"]), clean_text(r["model"])) if p).strip()
         years = clean_text(r["years"]) or clean_text(r["model_year"])
         comment = clean_text(r["comment"])
         line = vehicle
         if years:
             line += (" — " if line else "") + years
-        if comment and comment.lower() not in line.lower():
+        if comment and comment.casefold() not in line.casefold():
             line += (" • " if line else "") + comment
         line = line.strip()
-        norm = line.casefold()
-        if line and norm not in seen:
-            seen.add(norm)
+        marker = line.casefold()
+        if line and marker not in seen:
+            seen.add(marker)
             applicability.append(line)
 
     return {
@@ -254,7 +267,7 @@ def _find_box(root, text):
     return None
 
 
-def _format_result(product: dict, max_lines=12) -> str:
+def _format_result(product: dict, max_lines=10) -> str:
     lines = []
     if product.get("name"):
         lines.append(product["name"])
@@ -267,13 +280,11 @@ def _format_result(product: dict, max_lines=12) -> str:
         lines.append("   ".join(ids))
     apps = product.get("applicability") or []
     if apps:
-        lines.append("")
-        lines.append("Применяемость:")
+        lines += ["", "Применяемость:"]
         lines.extend(f"• {x}" for x in apps[:max_lines])
         if len(apps) > max_lines:
             lines.append(f"… ещё {len(apps) - max_lines}")
-    lines.append("")
-    lines.append(f"Строк в базе: {product.get('row_count', 0)}")
+    lines += ["", f"Строк в базе: {product.get('row_count', 0)}"]
     return "\n".join(lines)
 
 
@@ -283,6 +294,7 @@ def build_marketplace_catalog(self):
     self.marketplace_catalog_status = tk.StringVar(master=self, value="База не загружена")
     self.marketplace_result_var = tk.StringVar(master=self, value="Введите артикул или код номенклатуры")
     self.marketplace_selected_product = None
+    self._marketplace_queue = queue.Queue()
 
     basic = _find_box(self, "2. Основные настройки")
     if basic is None:
@@ -293,7 +305,7 @@ def build_marketplace_catalog(self):
 
     top = ttk.Frame(box)
     top.pack(fill="x")
-    ttk.Button(top, text="Загрузить Excel базу", command=lambda: self._marketplace_import_excel()).pack(side="left")
+    ttk.Button(top, text="Загрузить Excel базу", command=self._marketplace_import_excel).pack(side="left")
     ttk.Label(top, textvariable=self.marketplace_catalog_status).pack(side="left", padx=10)
 
     search = ttk.Frame(box)
@@ -301,29 +313,25 @@ def build_marketplace_catalog(self):
     ttk.Label(search, text="Артикул / код:").pack(side="left")
     entry = ttk.Entry(search, textvariable=self.marketplace_article_var, width=28)
     entry.pack(side="left", padx=6)
-    ttk.Button(search, text="НАЙТИ ТОВАР", command=lambda: self._marketplace_lookup()).pack(side="left")
+    ttk.Button(search, text="НАЙТИ ТОВАР", command=self._marketplace_lookup).pack(side="left")
     entry.bind("<Return>", lambda _e: self._marketplace_lookup())
 
-    result = tk.Label(
+    tk.Label(
         box,
         textvariable=self.marketplace_result_var,
-        justify="left",
-        anchor="w",
-        bg="#ffffff",
-        relief="solid",
-        borderwidth=1,
-        padx=10,
-        pady=8,
-        wraplength=720,
-    )
-    result.pack(fill="x", pady=(8, 0))
+        justify="left", anchor="w", bg="#ffffff", relief="solid", borderwidth=1,
+        padx=10, pady=8, wraplength=720,
+    ).pack(fill="x", pady=(8, 0))
 
     meta = catalog_metadata()
     if meta:
-        self.marketplace_catalog_status.set(f"База: {meta.get('source_name','Excel')} • {meta.get('rows',0):,} строк".replace(",", " "))
+        self.marketplace_catalog_status.set(
+            f"База: {meta.get('source_name','Excel')} • {meta.get('rows',0):,} строк".replace(",", " ")
+        )
+    self.after(150, self._marketplace_poll_events)
 
 
-def _marketplace_import_excel(self):
+def marketplace_import_excel(self):
     path = filedialog.askopenfilename(
         title="Выберите Excel с базой товаров",
         filetypes=[("Excel", "*.xlsx")],
@@ -334,20 +342,18 @@ def _marketplace_import_excel(self):
     self.status.set("Импорт Excel для маркетплейсов…")
 
     def progress(count):
-        if count % 10000 == 0:
-            self.ui_queue.put(("marketplace_import_progress", count))
+        self._marketplace_queue.put(("progress", count))
 
     def worker():
         try:
             meta = import_excel_to_sqlite(Path(path), progress=progress)
-            self.ui_queue.put(("marketplace_import_done", meta))
+            self._marketplace_queue.put(("done", meta))
         except Exception as exc:
-            self.ui_queue.put(("marketplace_import_error", str(exc)))
-
+            self._marketplace_queue.put(("error", str(exc)))
     threading.Thread(target=worker, daemon=True).start()
 
 
-def _marketplace_lookup(self):
+def marketplace_lookup(self):
     query = self.marketplace_article_var.get().strip()
     if not query:
         messagebox.showwarning("Маркетплейсы", "Введите артикул или код номенклатуры.")
@@ -366,15 +372,7 @@ def _marketplace_lookup(self):
     self.status.set(f"Найден товар: {product.get('article') or product.get('code') or query}")
 
 
-def process_ui_queue_marketplace(self):
-    # This method is intentionally not installed; instead we extend the existing
-    # queue handler by polling our own lightweight queue events through after().
-    pass
-
-
-def _poll_marketplace_events(self):
-    # Existing app consumes ui_queue itself. We use a dedicated queue to avoid
-    # stealing its events.
+def marketplace_poll_events(self):
     try:
         while True:
             event = self._marketplace_queue.get_nowait()
@@ -384,39 +382,21 @@ def _poll_marketplace_events(self):
                 self.marketplace_catalog_status.set(f"Импортировано: {count:,} строк".replace(",", " "))
             elif kind == "done":
                 meta = event[1]
-                self.marketplace_catalog_status.set(f"База: {meta.get('source_name','Excel')} • {meta.get('rows',0):,} строк".replace(",", " "))
+                self.marketplace_catalog_status.set(
+                    f"База: {meta.get('source_name','Excel')} • {meta.get('rows',0):,} строк".replace(",", " ")
+                )
                 self.status.set("База маркетплейсов загружена")
-                messagebox.showinfo("Маркетплейсы", f"База загружена.\nСтрок: {meta.get('rows',0):,}".replace(",", " "))
+                messagebox.showinfo(
+                    "Маркетплейсы",
+                    f"База загружена.\nСтрок: {meta.get('rows',0):,}".replace(",", " "),
+                )
             elif kind == "error":
                 self.marketplace_catalog_status.set("Ошибка импорта")
                 self.status.set("Ошибка импорта базы")
                 messagebox.showerror("Маркетплейсы", event[1])
-    except Exception:
+    except queue.Empty:
         pass
-    self.after(150, lambda: _poll_marketplace_events(self))
-
-
-def _marketplace_import_excel_v2(self):
-    import queue
-    if not hasattr(self, "_marketplace_queue"):
-        self._marketplace_queue = queue.Queue()
-        self.after(150, lambda: _poll_marketplace_events(self))
-    path = filedialog.askopenfilename(title="Выберите Excel с базой товаров", filetypes=[("Excel", "*.xlsx")])
-    if not path:
-        return
-    self.marketplace_catalog_status.set("Импорт базы…")
-    self.status.set("Импорт Excel для маркетплейсов…")
-
-    def progress(count):
-        self._marketplace_queue.put(("progress", count))
-
-    def worker():
-        try:
-            meta = import_excel_to_sqlite(Path(path), progress=progress)
-            self._marketplace_queue.put(("done", meta))
-        except Exception as exc:
-            self._marketplace_queue.put(("error", str(exc)))
-    threading.Thread(target=worker, daemon=True).start()
+    self.after(150, self._marketplace_poll_events)
 
 
 def settings_payload_marketplace(self):
@@ -443,8 +423,9 @@ def reset_settings_marketplace(self):
 
 
 app.App._build = build_marketplace_catalog
-app.App._marketplace_import_excel = _marketplace_import_excel_v2
-app.App._marketplace_lookup = _marketplace_lookup
+app.App._marketplace_import_excel = marketplace_import_excel
+app.App._marketplace_lookup = marketplace_lookup
+app.App._marketplace_poll_events = marketplace_poll_events
 app.App.settings_payload = settings_payload_marketplace
 app.App.load_settings = load_settings_marketplace
 app.App.reset_settings = reset_settings_marketplace
