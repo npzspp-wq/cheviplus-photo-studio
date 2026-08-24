@@ -10,15 +10,15 @@ import cheviplus_marketplace_catalog as marketplace  # noqa: F401
 import cheviplus_marketplace_excel_1c_patch as marketplace_1c  # noqa: F401
 import cheviplus_marketplace_cards as marketplace_cards  # noqa: F401
 import cheviplus_marketplace_clipboard_patch as marketplace_clipboard  # noqa: F401
+import cheviplus_marketplace_editor as marketplace_editor  # noqa: F401
 from cheviplus_update_support import prepare_upgrade_environment
 
-# Visible version/build belongs to the newest marketplace usability patch.
-renewal.APP_VERSION = marketplace_clipboard.APP_VERSION
-renewal.APP_BUILD = marketplace_clipboard.APP_BUILD
-renewal.app.APP_VERSION = marketplace_clipboard.APP_VERSION
-renewal.app.APP_BUILD = marketplace_clipboard.APP_BUILD
+renewal.APP_VERSION = marketplace_editor.APP_VERSION
+renewal.APP_BUILD = marketplace_editor.APP_BUILD
+renewal.app.APP_VERSION = marketplace_editor.APP_VERSION
+renewal.app.APP_BUILD = marketplace_editor.APP_BUILD
 
 
 if __name__ == "__main__":
-    prepare_upgrade_environment(marketplace_clipboard.APP_VERSION)
+    prepare_upgrade_environment(marketplace_editor.APP_VERSION)
     AdminRegistryApp().mainloop()
