@@ -6,7 +6,7 @@ from PIL import Image, ImageDraw
 import app
 import cheviplus_marketplace_catalog as catalog
 import cheviplus_marketplace_visual_v1 as visual
-APP_VERSION='5.27'; APP_BUILD='2026.08.25.01'
+APP_VERSION='5.34'; APP_BUILD='2026.08.25.08'
 DATA_FILE=catalog.CATALOG_DIR/'marketplace_extra_blocks.json'
 _ORIGINAL_BUILD=app.App._build
 
@@ -27,8 +27,13 @@ def info_card(photo,p,title,page,items,brand):
         y+=88 if y<400 else 36
         if y>1000:break
     top=max(y+20,760); d.rounded_rectangle((190,top,1010,1480),30,fill='white',outline=visual.LINE,width=2); obj,pos=visual.fit(photo,(225,top+35,975,1440)); im.paste(obj,pos); visual.footer(d,brand); return im
-def generate_five(photo_path,p,out_dir,brand=''):
-    photo=Image.open(photo_path).convert('RGB'); out_dir.mkdir(parents=True,exist_ok=True); extra=get_extra(p); items=[('01_OZON_MAIN.jpg',visual.main_card(photo,p,brand))]
+def generate_five(photo_path,p,out_dir,profile='Авто',bg=''):
+    # 5.34: accept the same (photo, product, output, profile, background)
+    # contract as visual.generate. Older code accepted only a final brand string,
+    # which broke when Auto background detection was added in 5.33.
+    photo=Image.open(photo_path).convert('RGB'); out_dir.mkdir(parents=True,exist_ok=True)
+    brand=visual.brand(profile,bg,photo_path)
+    extra=get_extra(p); items=[('01_OZON_MAIN.jpg',visual.main_card(photo,p,brand))]
     if p.get('applicability'):items.append(('02_OZON_APPLICABILITY.jpg',visual.app_card(photo,p,brand)))
     if extra.get('characteristics'):items.append(('03_OZON_CHARACTERISTICS.jpg',info_card(photo,p,'ХАРАКТЕРИСТИКИ',3,extra['characteristics'],brand)))
     if extra.get('advantages'):items.append(('04_OZON_ADVANTAGES.jpg',info_card(photo,p,'ПРЕИМУЩЕСТВА',4,extra['advantages'],brand)))
