@@ -13,8 +13,9 @@ import cheviplus_marketplace_editor as marketplace_editor  # noqa: F401
 import cheviplus_marketplace_templates as marketplace_templates  # noqa: F401
 import cheviplus_marketplace_visual_v1 as marketplace_visual  # noqa: F401
 import cheviplus_marketplace_five_cards as marketplace_five_cards  # noqa: F401
+import cheviplus_ozon_compliance as ozon_compliance  # noqa: F401
 import cheviplus_photo_picker_fix as photo_picker_fix  # noqa: F401
 from cheviplus_update_support import prepare_upgrade_environment
-renewal.APP_VERSION=marketplace_five_cards.APP_VERSION; renewal.APP_BUILD=marketplace_five_cards.APP_BUILD; renewal.app.APP_VERSION=marketplace_five_cards.APP_VERSION; renewal.app.APP_BUILD=marketplace_five_cards.APP_BUILD
+renewal.APP_VERSION=ozon_compliance.APP_VERSION; renewal.APP_BUILD=ozon_compliance.APP_BUILD; renewal.app.APP_VERSION=ozon_compliance.APP_VERSION; renewal.app.APP_BUILD=ozon_compliance.APP_BUILD
 if __name__=='__main__':
-    prepare_upgrade_environment(marketplace_five_cards.APP_VERSION); AdminRegistryApp().mainloop()
+    prepare_upgrade_environment(ozon_compliance.APP_VERSION); AdminRegistryApp().mainloop()
