@@ -1,17 +1,28 @@
 """Stable launcher for the packaged Windows application."""
-
 import sapphire_profile_patch as profile  # noqa: F401
 from cheviplus_license_registry import AdminRegistryApp
 import cheviplus_license_renewal as renewal  # noqa: F401
+import cheviplus_plexiglass as plexiglass  # noqa: F401
+import cheviplus_table_placement_patch as table_patch  # noqa: F401
+import cheviplus_compose_compat_patch as compose_compat  # noqa: F401
+import cheviplus_marketplace_catalog as marketplace  # noqa: F401
+import cheviplus_marketplace_excel_1c_patch as marketplace_1c  # noqa: F401
+import cheviplus_marketplace_cards as marketplace_cards  # noqa: F401
+import cheviplus_marketplace_clipboard_patch as marketplace_clipboard  # noqa: F401
+import cheviplus_marketplace_editor as marketplace_editor  # noqa: F401
+import cheviplus_marketplace_templates as marketplace_templates  # noqa: F401
+import cheviplus_marketplace_visual_v1 as marketplace_visual  # noqa: F401
+import cheviplus_marketplace_five_cards as marketplace_five_cards  # noqa: F401
+import cheviplus_ozon_compliance as ozon_compliance  # noqa: F401
+import cheviplus_marketplace_text_layout as marketplace_text_layout  # noqa: F401
+import cheviplus_photo_picker_fix as photo_picker_fix  # noqa: F401
+import cheviplus_workspace_modes as workspace_modes  # noqa: F401
+import cheviplus_ui_cleanup_532 as ui_cleanup  # noqa: F401
 from cheviplus_update_support import prepare_upgrade_environment
-
-# Licensing modules inherit the visible build number of the active profile branch.
-renewal.APP_VERSION = profile.APP_VERSION
-renewal.APP_BUILD = profile.APP_BUILD
-renewal.app.APP_VERSION = profile.APP_VERSION
-renewal.app.APP_BUILD = profile.APP_BUILD
-
-
-if __name__ == "__main__":
-    prepare_upgrade_environment(profile.APP_VERSION)
+renewal.APP_VERSION=ui_cleanup.APP_VERSION
+renewal.APP_BUILD=ui_cleanup.APP_BUILD
+renewal.app.APP_VERSION=ui_cleanup.APP_VERSION
+renewal.app.APP_BUILD=ui_cleanup.APP_BUILD
+if __name__=='__main__':
+    prepare_upgrade_environment(ui_cleanup.APP_VERSION)
     AdminRegistryApp().mainloop()

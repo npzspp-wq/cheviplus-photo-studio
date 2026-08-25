@@ -8,7 +8,7 @@ hiddenimports = []
 
 for package in (
     "rembg", "onnxruntime", "pymatting", "numpy", "scipy",
-    "skimage", "imageio", "pywt", "networkx", "pooch"
+    "skimage", "imageio", "pywt", "networkx", "pooch", "openpyxl"
 ):
     d, b, h = collect_all(package)
     datas += d
@@ -17,6 +17,7 @@ for package in (
 
 hiddenimports += collect_submodules("scipy")
 hiddenimports += collect_submodules("skimage")
+hiddenimports += collect_submodules("openpyxl")
 hiddenimports += [
     "scipy._lib",
     "scipy._lib.messagestream",
