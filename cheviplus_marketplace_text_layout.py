@@ -5,8 +5,8 @@ import cheviplus_marketplace_visual_v1 as visual
 import cheviplus_marketplace_five_cards as five
 import cheviplus_ozon_compliance as ozon
 
-APP_VERSION='5.29'
-APP_BUILD='2026.08.25.03'
+APP_VERSION='5.30'
+APP_BUILD='2026.08.25.04'
 MAX_ITEMS=3
 WARN_CHARS=130
 RECOMMENDED_CHARS=90
@@ -17,29 +17,61 @@ def _measure(draw,text,font):
     return box[2]-box[0]
 
 
+def _split_token(draw,token,font,max_width):
+    """Split one very long word/code so it can never leave the card box."""
+    result=[]
+    current=''
+    for ch in str(token):
+        trial=current+ch
+        if current and _measure(draw,trial,font)>max_width:
+            result.append(current)
+            current=ch
+        else:
+            current=trial
+    if current:
+        result.append(current)
+    return result
+
+
 def _wrap_words(draw,text,font,max_width,max_lines):
-    words=str(text or '').strip().split()
-    if not words:return []
+    raw_words=str(text or '').strip().split()
+    if not raw_words:return []
+    words=[]
+    for word in raw_words:
+        if _measure(draw,word,font)>max_width:
+            words.extend(_split_token(draw,word,font,max_width))
+        else:
+            words.append(word)
     lines=[]; current=''
     for word in words:
         trial=(current+' '+word).strip()
         if not current or _measure(draw,trial,font)<=max_width:
             current=trial
         else:
-            lines.append(current); current=word
-            if len(lines)>=max_lines-1:break
-    if current and len(lines)<max_lines:lines.append(current)
-    return lines
+            lines.append(current)
+            current=word
+            if len(lines)>=max_lines-1:
+                break
+    if current and len(lines)<max_lines:
+        lines.append(current)
+    # Last safety net: no rendered row may ever exceed the allowed pixel width.
+    safe=[]
+    for row in lines:
+        if _measure(draw,row,font)<=max_width:
+            safe.append(row)
+        else:
+            safe.extend(_split_token(draw,row,font,max_width))
+    return safe[:max_lines]
 
 
 def _fit_text(draw,text,max_width,max_lines=3):
-    for size in (36,34,32,30,28,26):
+    for size in (36,34,32,30,28,26,24):
         f=visual.font(size,1)
         wrapped=_wrap_words(draw,text,f,max_width,max_lines)
         if wrapped and len(wrapped)<=max_lines and all(_measure(draw,x,f)<=max_width for x in wrapped):
             return f,wrapped,size
-    f=visual.font(26,1)
-    return f,_wrap_words(draw,text,f,max_width,max_lines),26
+    f=visual.font(24,1)
+    return f,_wrap_words(draw,text,f,max_width,max_lines),24
 
 
 def info_card(photo,p,title,page,items,brand):
@@ -47,8 +79,8 @@ def info_card(photo,p,title,page,items,brand):
     usable=[str(x).strip() for x in items if str(x).strip()][:MAX_ITEMS]
     y=245
     for i,item in enumerate(usable,1):
-        f,rows,size=_fit_text(d,item,900,3)
-        row_height=max(118,38+len(rows)*(size+9))
+        f,rows,size=_fit_text(d,item,880,3)
+        row_height=max(118,42+len(rows)*(size+10))
         d.rounded_rectangle((64,y,1136,y+row_height),22,fill='white',outline=visual.LINE,width=2)
         center=y+row_height//2
         d.ellipse((90,center-24,138,center+24),fill=visual.RED)
@@ -56,7 +88,7 @@ def info_card(photo,p,title,page,items,brand):
         ty=y+24
         for row in rows:
             d.text((166,ty),row,font=f,fill=visual.TEXT)
-            ty+=size+9
+            ty+=size+10
         y+=row_height+18
     top=max(y+26,720)
     if top>1050:top=1050
