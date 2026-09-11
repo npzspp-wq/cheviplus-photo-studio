@@ -18,11 +18,14 @@ import cheviplus_marketplace_text_layout as marketplace_text_layout  # noqa: F40
 import cheviplus_photo_picker_fix as photo_picker_fix  # noqa: F401
 import cheviplus_workspace_modes as workspace_modes  # noqa: F401
 import cheviplus_ui_cleanup_532 as ui_cleanup  # noqa: F401
+import cheviplus_license_resilience as license_resilience  # noqa: F401
 from cheviplus_update_support import prepare_upgrade_environment
-renewal.APP_VERSION=ui_cleanup.APP_VERSION
-renewal.APP_BUILD=ui_cleanup.APP_BUILD
-renewal.app.APP_VERSION=ui_cleanup.APP_VERSION
-renewal.app.APP_BUILD=ui_cleanup.APP_BUILD
+
+renewal.APP_VERSION=license_resilience.APP_VERSION
+renewal.APP_BUILD=license_resilience.APP_BUILD
+renewal.app.APP_VERSION=license_resilience.APP_VERSION
+renewal.app.APP_BUILD=license_resilience.APP_BUILD
+
 if __name__=='__main__':
-    prepare_upgrade_environment(ui_cleanup.APP_VERSION)
+    prepare_upgrade_environment(license_resilience.APP_VERSION)
     AdminRegistryApp().mainloop()
