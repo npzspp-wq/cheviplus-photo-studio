@@ -69,7 +69,14 @@ def _keep_meaningful_components(binary, min_abs=60, min_fraction=0.006):
 
 
 def suppress_old_background(alpha: Image.Image, strict=True):
-    """Conservative old-background cleanup that preserves separate kit parts."""
+    """Remove edge-connected background leakage while preserving separated kit parts.
+
+    The previous version kept any sufficiently large component.  On product photos
+    shot against a branded banner/table this could preserve large pieces of the old
+    scene.  This version treats components connected to the image border as likely
+    background, while keeping confident interior components (including separate
+    brackets/plates from a kit).
+    """
     if not strict:
         return alpha
 
@@ -77,48 +84,95 @@ def suppress_old_background(alpha: Image.Image, strict=True):
     from scipy import ndimage
 
     arr = np.asarray(alpha, dtype=np.uint8)
-    support = arr >= 28
+    h, w = arr.shape
+    image_area = max(1, h * w)
 
-    core = arr >= 175
-    core, _, _ = _keep_meaningful_components(core, min_abs=45, min_fraction=0.004)
-    core = ndimage.binary_closing(core, structure=np.ones((3, 3)), iterations=1)
-    core = ndimage.binary_fill_holes(core)
-
-    if not core.any():
+    # Build a confident core. A light erosion breaks thin accidental bridges between
+    # the product and banner/table before connected-component analysis.
+    core0 = arr >= 170
+    eroded = ndimage.binary_erosion(core0, structure=np.ones((3, 3)), iterations=1)
+    labels, count = ndimage.label(eroded)
+    if count == 0:
         return alpha
 
-    distance = ndimage.distance_transform_edt(~core)
-    candidate = support & (core | (distance <= 7.0))
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    boxes = _component_bboxes(labels, count)
+    keep_core = np.zeros_like(core0, dtype=bool)
 
-    labels, count = ndimage.label(candidate)
-    if count:
-        sizes = np.bincount(labels.ravel())
-        sizes[0] = 0
-        largest = max(1, int(sizes.max()))
-        keep = np.zeros_like(candidate, dtype=bool)
-        dist_to_core = ndimage.distance_transform_edt(~core)
-        boxes = _component_bboxes(labels, count)
-        h, w = candidate.shape
-        for idx in range(1, count + 1):
-            component = labels == idx
-            size = int(sizes[idx])
-            if size <= 0:
+    margin_y = max(2, int(h * 0.012))
+    margin_x = max(2, int(w * 0.012))
+    min_part = max(36, int(image_area * 0.00018))
+    largest = max(1, int(sizes.max()))
+
+    for idx in range(1, count + 1):
+        size = int(sizes[idx])
+        if size < min_part:
+            continue
+        x0, y0, x1, y1 = boxes.get(idx, (0, 0, -1, -1))
+        bw, bh = x1 - x0 + 1, y1 - y0 + 1
+        touches_border = (
+            x0 <= margin_x or y0 <= margin_y
+            or x1 >= w - 1 - margin_x or y1 >= h - 1 - margin_y
+        )
+        # Interior sizeable pieces are product candidates.  A border component is
+        # accepted only when it is dominant and spans the central image area; this
+        # avoids deleting a legitimately cropped large product.
+        cx = (x0 + x1) * 0.5
+        cy = (y0 + y1) * 0.5
+        central = (0.12 * w <= cx <= 0.88 * w and 0.10 * h <= cy <= 0.90 * h)
+        dominant = size >= largest * 0.55 and bw >= w * 0.28 and bh >= h * 0.08
+        if (not touches_border) or (dominant and central):
+            keep_core |= labels == idx
+
+    if not keep_core.any():
+        # Fail safe: never return an empty mask.
+        main_id = int(sizes.argmax())
+        keep_core = labels == main_id
+
+    # Restore the one-pixel erosion and allow only a narrow natural alpha fringe.
+    keep_core = ndimage.binary_dilation(keep_core, structure=np.ones((3, 3)), iterations=1)
+    support = arr >= 24
+    distance = ndimage.distance_transform_edt(~keep_core)
+    candidate = support & (keep_core | (distance <= 6.0))
+
+    # Preserve separate real kit pieces that are confidently segmented and interior.
+    confident = arr >= 205
+    c_labels, c_count = ndimage.label(confident)
+    if c_count:
+        c_sizes = np.bincount(c_labels.ravel())
+        c_sizes[0] = 0
+        c_boxes = _component_bboxes(c_labels, c_count)
+        for idx in range(1, c_count + 1):
+            size = int(c_sizes[idx])
+            if size < min_part:
                 continue
-            box = boxes.get(idx, (0, 0, -1, -1))
-            touches_core = bool((component & core).any())
-            near_core = float(dist_to_core[component].min()) <= max(12, min(candidate.shape) * 0.025)
-            is_real_size = size >= max(45, int(largest * 0.012))
-            is_long = (_bbox_area(box) >= max(80, int(h * w * 0.0004)))
-            if touches_core or (near_core and is_real_size) or (is_real_size and is_long):
-                keep |= component
-    else:
-        keep = candidate
+            x0, y0, x1, y1 = c_boxes.get(idx, (0, 0, -1, -1))
+            touches_border = (
+                x0 <= margin_x or y0 <= margin_y
+                or x1 >= w - 1 - margin_x or y1 >= h - 1 - margin_y
+            )
+            if not touches_border:
+                part = c_labels == idx
+                # Include the original soft edge around the confident component.
+                d = ndimage.distance_transform_edt(~part)
+                candidate |= support & (d <= 5.0)
 
-    result = np.where(keep, arr, 0).astype(np.uint8)
-    result[core] = 255
+    # Any weak region still connected to the outer frame is old-scene leakage.
+    weak = candidate & (arr < 150)
+    border_seed = np.zeros_like(weak, dtype=bool)
+    border_seed[0, :] = weak[0, :]
+    border_seed[-1, :] = weak[-1, :]
+    border_seed[:, 0] |= weak[:, 0]
+    border_seed[:, -1] |= weak[:, -1]
+    if border_seed.any():
+        edge_leak = ndimage.binary_propagation(border_seed, mask=weak)
+        candidate &= ~edge_leak
+
+    result = np.where(candidate, arr, 0).astype(np.uint8)
+    result[keep_core] = 255
     result[result < 22] = 0
     return Image.fromarray(result, mode="L")
-
 
 def remove_isolated_artifacts(rgba: Image.Image, strength=82):
     """Remove small floating artefacts while keeping real separated set items."""
