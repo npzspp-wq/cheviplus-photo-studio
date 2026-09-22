@@ -122,7 +122,11 @@ def suppress_old_background(alpha: Image.Image, strict=True):
         cy = (y0 + y1) * 0.5
         central = (0.12 * w <= cx <= 0.88 * w and 0.10 * h <= cy <= 0.90 * h)
         dominant = size >= largest * 0.55 and bw >= w * 0.28 and bh >= h * 0.08
-        if (not touches_border) or (dominant and central):
+        # Edge-connected regions are usually the shooting scene (banner/table).
+        # Never rescue them merely because they are large: that was the regression
+        # seen on branded DriveTime backgrounds. A genuinely cropped product is
+        # handled by the fail-safe below only when no interior product core exists.
+        if not touches_border:
             keep_core |= labels == idx
 
     if not keep_core.any():
