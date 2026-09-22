@@ -35,6 +35,22 @@ class StabilityPatchTests(unittest.TestCase):
         self.assertGreater(arr[50:75, 165:195].mean(), 240)
         self.assertEqual(int(arr[8:14, 116:123].max()), 0)
 
+    def test_border_connected_banner_is_removed_but_interior_kit_is_kept(self):
+        alpha = Image.new("L", (320, 180), 0)
+        draw = ImageDraw.Draw(alpha)
+        # Main long product and a separate bracket.
+        draw.rectangle((45, 82, 275, 128), fill=255)
+        draw.rectangle((135, 135, 185, 165), fill=235)
+        # Simulated old banner/table leakage connected to image edges.
+        draw.rectangle((0, 5, 319, 45), fill=190)
+        draw.rectangle((0, 155, 105, 179), fill=120)
+        cleaned = patch.suppress_old_background(alpha, strict=True)
+        arr = np.asarray(cleaned)
+        self.assertGreater(arr[95:115, 80:240].mean(), 240)
+        self.assertGreater(arr[142:158, 145:175].mean(), 180)
+        self.assertEqual(int(arr[10:30, 20:300].max()), 0)
+        self.assertEqual(int(arr[165:178, 5:90].max()), 0)
+
     def test_safe_numeric_parsing_clamps_bad_export_values(self):
         self.assertEqual(patch._safe_int("bad", 88, 45, 95), 88)
         self.assertEqual(patch._safe_int("999", 88, 45, 95), 95)
