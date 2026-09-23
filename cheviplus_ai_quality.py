@@ -15,7 +15,7 @@ import cheviplus_product_cutout as pc
 import cheviplus_backdrop_quality as bq
 
 APP_VERSION="5.36"
-APP_BUILD="2026.09.23.02"
+APP_BUILD="2026.09.23.03"
 MODE_FAST="Быстро — локально"
 MODE_QUALITY="Максимальное качество AI — локально"
 MODE_PRODUCT_ONLY="Товар без упаковки — точно"
@@ -345,7 +345,13 @@ class AIQualityApp(bq.BackdropQualityApp):
   messagebox.showinfo("PIN","PIN администратора изменён.",parent=self)
 
  def current_options(self):
-  options=super().current_options(); options["processing_mode"]=self.ai_quality_var.get(); return options
+  options=super().current_options()
+  mode=self.ai_quality_var.get()
+  options["processing_mode"]=mode
+  # Diagnostic breadcrumb visible in normal operation so we can prove which engine ran.
+  try:self.status.set("Выбран режим AI: "+mode)
+  except Exception:pass
+  return options
  def _begin_ai_indicator(self,text):
   self._ai_busy=True; self._ai_busy_phase=0; self._ai_busy_text=text; self.progress.configure(mode="indeterminate"); self.progress.start(12); self._animate_ai_indicator()
  def _animate_ai_indicator(self):
