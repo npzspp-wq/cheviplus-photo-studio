@@ -19,6 +19,10 @@ import cheviplus_photo_picker_fix as photo_picker_fix  # noqa: F401
 import cheviplus_workspace_modes as workspace_modes  # noqa: F401
 import cheviplus_ui_cleanup_532 as ui_cleanup  # noqa: F401
 import cheviplus_license_resilience as license_resilience  # noqa: F401
+# IMPORTANT: license_registry imports ai_quality but its class was historically based on
+# the older LicenseApp, so selecting an AI mode changed the combobox without changing
+# the processing path. Build the final application from AIQualityApp + registry controls.
+from cheviplus_ai_quality import AIQualityApp
 from cheviplus_update_support import prepare_upgrade_environment
 
 renewal.APP_VERSION=license_resilience.APP_VERSION
@@ -26,6 +30,10 @@ renewal.APP_BUILD=license_resilience.APP_BUILD
 renewal.app.APP_VERSION=license_resilience.APP_VERSION
 renewal.app.APP_BUILD=license_resilience.APP_BUILD
 
+class FinalApp(AdminRegistryApp, AIQualityApp):
+    """Final packaged UI: licensing/registry plus the real AI processing implementation."""
+    pass
+
 if __name__=='__main__':
     prepare_upgrade_environment(license_resilience.APP_VERSION)
-    AdminRegistryApp().mainloop()
+    FinalApp().mainloop()
