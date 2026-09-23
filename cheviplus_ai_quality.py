@@ -15,7 +15,7 @@ import cheviplus_product_cutout as pc
 import cheviplus_backdrop_quality as bq
 
 APP_VERSION="5.36"
-APP_BUILD="2026.09.23.01"
+APP_BUILD="2026.09.23.02"
 MODE_FAST="Быстро — локально"
 MODE_QUALITY="Максимальное качество AI — локально"
 MODE_PRODUCT_ONLY="Товар без упаковки — точно"
@@ -194,16 +194,43 @@ def _remove_flat_support_surface(original, alpha_array):
 
 
 def build_product_only_mask(original):
- """BiRefNet product mask plus explicit removal of visible packaging/support surfaces."""
+ """Aggressive product-only mask: separate the dominant product from packaging/support."""
  import numpy as np
+ from scipy import ndimage
  raw=np.asarray(_quality_segment_alpha(original),dtype=np.uint8)
  combined=bq._safe_background_cleanup(original,raw)
+ rgb=np.asarray(original.convert("RGB"),dtype=np.float32)
+ lum=rgb.mean(axis=2); chroma=rgb.max(axis=2)-rgb.min(axis=2)
+ h,w=lum.shape; area=h*w
+
+ # A common catalogue failure is a black automotive part on a pale printed carton.
+ # BiRefNet sees both as one foreground object. Detect a substantial dark product core
+ # and make that core authoritative instead of the outer silhouette of the carton.
+ dark=(raw>=72)&(lum<=92)
+ dark=ndimage.binary_closing(dark,structure=np.ones((5,5),dtype=bool),iterations=2)
+ labels,count=ndimage.label(dark)
+ dark_core=np.zeros_like(dark,dtype=bool)
+ if count:
+  sizes=np.bincount(labels.ravel()); sizes[0]=0
+  order=np.argsort(sizes)[::-1]
+  main=int(order[0]) if len(order) else 0
+  if main and sizes[main]>=area*.018:
+   dark_core=labels==main
+   # Keep nearby genuine edges/chrome fasteners, but do not flood into the carton.
+   near=ndimage.binary_dilation(dark_core,iterations=max(4,int(min(h,w)*.012)))
+   product_support=(raw>=38)&near
+   product_support=ndimage.binary_closing(product_support,structure=np.ones((3,3),dtype=bool),iterations=1)
+   # Preserve real holes: fill only tiny segmentation gaps, not mounting holes.
+   alpha=np.where(product_support,raw,0).astype(np.uint8)
+   alpha[dark_core]=np.maximum(alpha[dark_core],230)
+   alpha[alpha<24]=0
+   return Image.fromarray(alpha,mode="L")
+
+ # Fallback for non-dark products: conservative AI mask plus flat-support removal.
  support=pc._meaningful_component_mask(combined)
  combined=np.where(support,combined,0).astype(np.uint8)
  combined=pc._solidify_product_interior(combined)
  combined=_remove_flat_support_surface(original,combined)
-
- # Re-run component cleanup after removing the board so detached labels/printing vanish.
  support=pc._meaningful_component_mask(combined)
  combined=np.where(support,combined,0).astype(np.uint8)
  combined=_restore_real_holes(raw,combined)
