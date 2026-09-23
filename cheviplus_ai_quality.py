@@ -15,7 +15,7 @@ import cheviplus_product_cutout as pc
 import cheviplus_backdrop_quality as bq
 
 APP_VERSION="5.36"
-APP_BUILD="2026.09.23.03"
+APP_BUILD="2026.09.23.04"
 MODE_FAST="Быстро — локально"
 MODE_QUALITY="Максимальное качество AI — локально"
 MODE_PRODUCT_ONLY="Товар без упаковки — точно"
@@ -194,48 +194,61 @@ def _remove_flat_support_surface(original, alpha_array):
 
 
 def build_product_only_mask(original):
- """Aggressive product-only mask: separate the dominant product from packaging/support."""
+ """Product-first segmentation: identify the long dark automotive part, not the whole scene."""
  import numpy as np
  from scipy import ndimage
  raw=np.asarray(_quality_segment_alpha(original),dtype=np.uint8)
- combined=bq._safe_background_cleanup(original,raw)
  rgb=np.asarray(original.convert("RGB"),dtype=np.float32)
  lum=rgb.mean(axis=2); chroma=rgb.max(axis=2)-rgb.min(axis=2)
- h,w=lum.shape; area=h*w
+ h,w=lum.shape; yy,xx=np.indices((h,w)); area=h*w
 
- # A common catalogue failure is a black automotive part on a pale printed carton.
- # BiRefNet sees both as one foreground object. Detect a substantial dark product core
- # and make that core authoritative instead of the outer silhouette of the carton.
- dark=(raw>=72)&(lum<=92)
- dark=ndimage.binary_closing(dark,structure=np.ones((5,5),dtype=bool),iterations=2)
- labels,count=ndimage.label(dark)
- dark_core=np.zeros_like(dark,dtype=bool)
- if count:
-  sizes=np.bincount(labels.ravel()); sizes[0]=0
-  order=np.argsort(sizes)[::-1]
-  main=int(order[0]) if len(order) else 0
-  if main and sizes[main]>=area*.018:
-   dark_core=labels==main
-   # Keep nearby genuine edges/chrome fasteners, but do not flood into the carton.
-   near=ndimage.binary_dilation(dark_core,iterations=max(4,int(min(h,w)*.012)))
-   product_support=(raw>=38)&near
-   product_support=ndimage.binary_closing(product_support,structure=np.ones((3,3),dtype=bool),iterations=1)
-   # Preserve real holes: fill only tiny segmentation gaps, not mounting holes.
-   alpha=np.where(product_support,raw,0).astype(np.uint8)
-   alpha[dark_core]=np.maximum(alpha[dark_core],230)
-   alpha[alpha<24]=0
-   return Image.fromarray(alpha,mode="L")
+ # Automotive catalogue photos often contain a long black bumper/body part against a
+ # branded banner, rack and table. Build an independent object seed from appearance and
+ # geometry, instead of accepting the foreground model's entire silhouette.
+ roi=(yy>=int(h*.38))&(yy<=int(h*.86))
+ seed=roi&(lum<=105)&(chroma<=72)
+ seed=ndimage.binary_opening(seed,structure=np.ones((3,3),bool))
+ seed=ndimage.binary_closing(seed,structure=np.ones((9,9),bool),iterations=2)
+ labels,count=ndimage.label(seed)
+ best=None
+ for idx in range(1,count+1):
+  ys,xs=np.where(labels==idx); n=len(xs)
+  if n<int(area*.008):continue
+  bw=xs.max()-xs.min()+1; bh=ys.max()-ys.min()+1
+  # Prefer the wide, substantial catalogue product; reject rack bars and small props.
+  score=n*(1.0+2.2*(bw/w))*(1.0+0.5*(bw/max(1,bh)))
+  if bw<w*.28:score*=.15
+  if best is None or score>best[0]:best=(score,idx)
+ if best is None:
+  return build_quality_mask(original)
 
- # Fallback for non-dark products: conservative AI mask plus flat-support removal.
- support=pc._meaningful_component_mask(combined)
- combined=np.where(support,combined,0).astype(np.uint8)
- combined=pc._solidify_product_interior(combined)
- combined=_remove_flat_support_surface(original,combined)
- support=pc._meaningful_component_mask(combined)
- combined=np.where(support,combined,0).astype(np.uint8)
- combined=_restore_real_holes(raw,combined)
- return Image.fromarray(combined,mode="L")
+ core=labels==best[1]
+ # Keep the product's genuine AI edge only close to the independently detected core.
+ near=ndimage.binary_dilation(core,iterations=max(5,int(min(h,w)*.018)))
+ candidate=(raw>=28)&near
+ # Add dark/medium product material connected to the core even where AI confidence dips.
+ material=roi&(lum<=145)&(chroma<=90)
+ grow=core.copy()
+ for _ in range(max(6,int(min(h,w)*.012))):
+  grow|=ndimage.binary_dilation(grow,structure=np.ones((3,3),bool))&material
+ product=candidate|grow
+ product=ndimage.binary_closing(product,structure=np.ones((3,3),bool),iterations=1)
 
+ # White/light foreground props (the centre stand/box) are never allowed to become product.
+ prop=(lum>=155)&(chroma<=55)&(yy>=int(h*.48))
+ prop=ndimage.binary_opening(prop,structure=np.ones((3,3),bool))
+ plabels,pcount=ndimage.label(prop)
+ for idx in range(1,pcount+1):
+  ys,xs=np.where(plabels==idx)
+  if len(xs)<int(area*.001):continue
+  bw=xs.max()-xs.min()+1; bh=ys.max()-ys.min()+1
+  if bw>=w*.035 and bh>=h*.035:
+   product[plabels==idx]=False
+
+ alpha=np.where(product,raw,0).astype(np.uint8)
+ alpha[core]=np.maximum(alpha[core],235)
+ alpha[alpha<24]=0
+ return Image.fromarray(alpha,mode="L")
 
 def remove_background(img,**kwargs):
  mode=getattr(_LOCAL,"mode",MODE_FAST)
