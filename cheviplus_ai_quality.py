@@ -1,4 +1,4 @@
-"""Cheviplus Photo Studio 5.9: two proven modes with admin-only service controls."""
+"""Cheviplus Photo Studio 5.36: AI cutout modes including aggressive package/support removal."""
 from __future__ import annotations
 from collections import OrderedDict
 from pathlib import Path
@@ -14,11 +14,12 @@ import app
 import cheviplus_product_cutout as pc
 import cheviplus_backdrop_quality as bq
 
-APP_VERSION="5.9"
-APP_BUILD="2026.08.11.07"
+APP_VERSION="5.36"
+APP_BUILD="2026.09.23.01"
 MODE_FAST="Быстро — локально"
 MODE_QUALITY="Максимальное качество AI — локально"
-MODES=(MODE_FAST, MODE_QUALITY)
+MODE_PRODUCT_ONLY="Товар без упаковки — точно"
+MODES=(MODE_FAST, MODE_QUALITY, MODE_PRODUCT_ONLY)
 QUALITY_MAX_SIDE=1600
 MASK_CACHE_LIMIT=16
 PIN_ITERATIONS=200_000
@@ -92,7 +93,7 @@ def _quality_segment_alpha(image):
 
 
 def _cache_key_from_source(source,mode):
- if mode!=MODE_QUALITY:return None
+ if mode not in (MODE_QUALITY, MODE_PRODUCT_ONLY):return None
  try:
   path=Path(source).resolve(); stat=path.stat(); return(str(path).lower(),stat.st_mtime_ns,stat.st_size,mode)
  except Exception:return None
@@ -135,12 +136,88 @@ def build_quality_mask(original):
  return Image.fromarray(combined,mode="L")
 
 
+
+def _remove_flat_support_surface(original, alpha_array):
+ """Remove large, smooth, pale cardboard/paper/support surfaces while preserving the product.
+
+ This is intentionally used only by MODE_PRODUCT_ONLY. It removes actual pixels that
+ look like a broad neutral support, rather than trusting the segmentation model to
+ distinguish "product" from packaging. Dark/coloured/chrome product pixels are protected.
+ """
+ import numpy as np
+ from scipy import ndimage
+
+ a=np.asarray(alpha_array,dtype=np.uint8).copy()
+ rgb=np.asarray(original.convert("RGB"),dtype=np.float32)
+ lum=rgb.mean(axis=2)
+ chroma=rgb.max(axis=2)-rgb.min(axis=2)
+
+ # Flatness estimate: packaging/table boards are broad low-texture neutral regions.
+ gray=lum
+ local_mean=ndimage.gaussian_filter(gray,sigma=2.0)
+ local_sq=ndimage.gaussian_filter(gray*gray,sigma=2.0)
+ local_std=np.sqrt(np.maximum(0.0,local_sq-local_mean*local_mean))
+
+ candidate=(a>=72)&(lum>=105)&(lum<=248)&(chroma<=48)&(local_std<=18)
+ candidate=ndimage.binary_closing(candidate,structure=np.ones((5,5),dtype=bool),iterations=2)
+ labels,count=ndimage.label(candidate)
+ if not count:return a
+
+ h,w=a.shape
+ image_area=h*w
+ remove=np.zeros_like(candidate,dtype=bool)
+ for idx in range(1,count+1):
+  comp=labels==idx
+  n=int(comp.sum())
+  if n<int(image_area*.012):continue
+  ys,xs=np.nonzero(comp)
+  if not len(xs):continue
+  bw=int(xs.max()-xs.min()+1); bh=int(ys.max()-ys.min()+1)
+  bbox=max(1,bw*bh); fill=n/bbox
+  broad=(bw>=w*.20 and bh>=h*.12) or (bw>=w*.12 and bh>=h*.20)
+  if broad and fill>=.22:remove|=comp
+
+ if not remove.any():return a
+
+ # Grow only through still-neutral pixels so printing/shadows on the same board disappear,
+ # but black rubber/plastic and coloured product material remain protected.
+ neutral=(lum>=82)&(chroma<=68)&(local_std<=34)&(a>=28)
+ grown=remove.copy()
+ for _ in range(5):
+  grown|=ndimage.binary_dilation(grown,structure=np.ones((3,3),dtype=bool))&neutral
+
+ # Feather one pixel at the product/support boundary.
+ edge=ndimage.binary_dilation(grown,iterations=1)&~grown
+ a[grown]=0
+ a[edge]=np.minimum(a[edge],96)
+ return a
+
+
+def build_product_only_mask(original):
+ """BiRefNet product mask plus explicit removal of visible packaging/support surfaces."""
+ import numpy as np
+ raw=np.asarray(_quality_segment_alpha(original),dtype=np.uint8)
+ combined=bq._safe_background_cleanup(original,raw)
+ support=pc._meaningful_component_mask(combined)
+ combined=np.where(support,combined,0).astype(np.uint8)
+ combined=pc._solidify_product_interior(combined)
+ combined=_remove_flat_support_surface(original,combined)
+
+ # Re-run component cleanup after removing the board so detached labels/printing vanish.
+ support=pc._meaningful_component_mask(combined)
+ combined=np.where(support,combined,0).astype(np.uint8)
+ combined=_restore_real_holes(raw,combined)
+ return Image.fromarray(combined,mode="L")
+
+
 def remove_background(img,**kwargs):
  mode=getattr(_LOCAL,"mode",MODE_FAST)
- if mode!=MODE_QUALITY:return _FAST_REMOVE(img,**kwargs)
+ if mode==MODE_FAST:return _FAST_REMOVE(img,**kwargs)
  try:
   key=getattr(_LOCAL,"cache_key",None); mask=_cache_get(key); hit=mask is not None
-  if mask is None:mask=build_quality_mask(img); _cache_put(key,mask)
+  if mask is None:
+   mask=build_product_only_mask(img) if mode==MODE_PRODUCT_ONLY else build_quality_mask(img)
+   _cache_put(key,mask)
   rgba=img.convert("RGBA"); rgba.putalpha(mask); info=app.analyze_object_shape(mask); info["mask_cache_hit"]=hit
   return rgba,info
  except Exception as exc:
@@ -176,7 +253,7 @@ class AIQualityApp(bq.BackdropQualityApp):
   ttk.Label(frame,text="Качество AI:").grid(row=7,column=0,sticky="w",pady=(10,4))
   self.ai_quality_combo=ttk.Combobox(frame,textvariable=self.ai_quality_var,values=MODES,state="readonly",width=36)
   self.ai_quality_combo.grid(row=7,column=1,columnspan=4,sticky="w",padx=8,pady=(10,4))
-  ttk.Label(frame,text="Быстрый режим — для массовой обработки. Максимальное качество — BiRefNet Lite для сложных фото.",wraplength=720).grid(row=8,column=0,columnspan=6,sticky="w",pady=(0,4))
+  ttk.Label(frame,text="Быстро — массовая обработка. Максимальное качество — сложные контуры. Товар без упаковки — убирает картон, листы и светлые подставки.",wraplength=720).grid(row=8,column=0,columnspan=6,sticky="w",pady=(0,4))
   admin_bar=ttk.Frame(frame); admin_bar.grid(row=9,column=0,columnspan=6,sticky="w",pady=(8,3))
   self.admin_button=ttk.Button(admin_bar,text="🔒 Администратор",command=self._toggle_admin_settings)
   self.admin_button.pack(side="left")
@@ -254,7 +331,7 @@ class AIQualityApp(bq.BackdropQualityApp):
   if self.status.get().startswith("Создание предпросмотра"):self._begin_ai_indicator("AI обрабатывает фото — пожалуйста, подождите")
  def show_preview(self,image,name):
   self._end_ai_indicator(); super().show_preview(image,name)
-  if self.ai_quality_var.get()==MODE_QUALITY:self.status.set("Предпросмотр готов • AI-маска сохранена для быстрой обработки")
+  if self.ai_quality_var.get() in (MODE_QUALITY,MODE_PRODUCT_ONLY):self.status.set("Предпросмотр готов • AI-маска сохранена для быстрой обработки")
  def start(self):
   super().start()
   if str(self.start_btn.cget("state"))=="disabled":self._begin_ai_indicator("AI обрабатывает фотографии")
