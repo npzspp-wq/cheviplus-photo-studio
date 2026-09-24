@@ -194,11 +194,11 @@ def _remove_flat_support_surface(original, alpha_array):
 
 
 def build_product_only_mask(original):
- """Deterministic dark-product extractor for catalogue photos.
+ """Product-first extractor for wide dark automotive parts on busy photo stands.
 
- Unlike the normal AI modes, this path does NOT trust BiRefNet's foreground silhouette.
- It builds the object from image pixels and geometry, so a branded backdrop/package
- cannot remain merely because the AI called it foreground.
+ The band is derived from the photo itself. Thin rack/background structures are
+ suppressed before selecting the horizontally dominant part. Growth is deliberately
+ short so logos visible through real openings do not get re-attached to the product.
  """
  import numpy as np
  from scipy import ndimage
@@ -206,63 +206,65 @@ def build_product_only_mask(original):
  lum=rgb.mean(axis=2); chroma=rgb.max(axis=2)-rgb.min(axis=2)
  h,w=lum.shape; yy,xx=np.indices((h,w)); area=h*w
 
- # Broad working band: most 1C product photos place the part around the middle/lower half.
- roi=(yy>=int(h*.30))&(yy<=int(h*.90))
+ dark=(lum<=120)&(chroma<=90)
+ row_density=dark.mean(axis=1)
+ candidate_rows=np.where((np.arange(h)>=int(h*.28))&(np.arange(h)<=int(h*.88))&(row_density>=.62))[0]
+ runs=[]
+ if len(candidate_rows):
+  first=prev=int(candidate_rows[0])
+  for y in candidate_rows[1:]:
+   y=int(y)
+   if y==prev+1:prev=y
+   else:runs.append((first,prev)); first=prev=y
+  runs.append((first,prev))
+ if runs:
+  band=max(runs,key=lambda r:r[1]-r[0])
+  y0=max(int(h*.34),band[0]-20)
+  y1=min(int(h*.84),band[1]+38)
+ else:
+  y0,y1=int(h*.38),int(h*.82)
+ roi=(yy>=y0)&(yy<=y1)
 
- # Strong dark material seed. The bumper/body part is large and horizontally dominant.
- seed=roi&(lum<=112)&(chroma<=85)
- seed=ndimage.binary_opening(seed,np.ones((3,3),bool))
- seed=ndimage.binary_closing(seed,np.ones((11,11),bool),iterations=2)
+ seed=roi&(lum<=125)&(chroma<=100)
+ # Horizontal opening removes fence/rack bars while retaining a wide bumper/trim part.
+ seed=ndimage.binary_opening(seed,np.ones((3,9),dtype=bool))
  labels,count=ndimage.label(seed)
- if not count:
-  return build_quality_mask(original)
-
  best_idx=0; best_score=-1.0
  for idx in range(1,count+1):
-  ys,xs=np.where(labels==idx); n=len(xs)
-  if n<int(area*.004):continue
+  ys,xs=np.where(labels==idx)
+  if len(xs)<int(area*.004):continue
   bw=int(xs.max()-xs.min()+1); bh=int(ys.max()-ys.min()+1)
-  if bw<int(w*.22):continue
+  if bw<int(w*.42):continue
   horizontal=bw/max(1,bh)
-  centre=1.0-abs(float(xs.mean())-w/2)/(w/2)
-  score=n*(1+3.0*bw/w)*(1+min(4.0,horizontal)*.35)*(0.7+0.3*centre)
+  score=len(xs)*(1+2.5*bw/w)*(1+min(5.0,horizontal)*.25)
   if score>best_score:best_score=score; best_idx=idx
  if not best_idx:
   return build_quality_mask(original)
 
  core=labels==best_idx
-
- # Grow through plausible dark/medium product material only. This recovers antialiased
- # edges and moulded grey areas without flooding into white banner, table or packaging.
- allowed=roi&(lum<=155)&(chroma<=110)
+ allowed=roi&(lum<=175)&(chroma<=120)
  product=core.copy()
- for _ in range(max(8,int(min(h,w)*.018))):
-  nxt=product|(ndimage.binary_dilation(product,np.ones((3,3),bool))&allowed)
-  if np.array_equal(nxt,product):break
-  product=nxt
+ # Only a short geodesic expansion: enough for antialiased/grey moulded edges, not
+ # enough to bridge from the part into printed logos behind openings.
+ for _ in range(4):
+  product|=ndimage.binary_dilation(product,np.ones((3,3),bool))&allowed
 
- # Smooth tiny edge breaks but never fill the large real openings in a bumper.
- product=ndimage.binary_closing(product,np.ones((3,3),bool),iterations=1)
-
- # Explicitly remove large pale props/stands that overlap the product silhouette.
- pale=roi&(lum>=150)&(chroma<=65)
+ # Remove broad pale stands/boxes even where they overlap the part silhouette.
+ pale=roi&(lum>=145)&(chroma<=72)
  pale=ndimage.binary_opening(pale,np.ones((3,3),bool))
  plabels,pcount=ndimage.label(pale)
  for idx in range(1,pcount+1):
   ys,xs=np.where(plabels==idx)
-  if len(xs)<int(area*.0008):continue
+  if len(xs)<int(area*.0007):continue
   bw=int(xs.max()-xs.min()+1); bh=int(ys.max()-ys.min()+1)
   if bw>=int(w*.025) and bh>=int(h*.025):
-   prop=ndimage.binary_dilation(plabels==idx,iterations=1)
-   product[prop]=False
+   product[ndimage.binary_dilation(plabels==idx,iterations=1)]=False
 
- # Keep only components attached to the chosen product core.
- labels2,n2=ndimage.label(product)
- core_ids=np.unique(labels2[core])
- keep=np.isin(labels2,core_ids[core_ids>0]) if np.any(core_ids>0) else core
- alpha=np.zeros((h,w),dtype=np.uint8)
- alpha[keep]=255
- # One-pixel feather for a natural edge.
+ # Keep only material still connected to the selected horizontal product.
+ labels2,_=ndimage.label(product)
+ core_ids=np.unique(labels2[core]); core_ids=core_ids[core_ids>0]
+ keep=np.isin(labels2,core_ids) if len(core_ids) else core
+ alpha=np.zeros((h,w),dtype=np.uint8); alpha[keep]=255
  edge=ndimage.binary_dilation(keep,iterations=1)&~keep
  alpha[edge]=96
  return Image.fromarray(alpha,mode="L")
