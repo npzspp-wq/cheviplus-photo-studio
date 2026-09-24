@@ -31,8 +31,20 @@ renewal.app.APP_VERSION=license_resilience.APP_VERSION
 renewal.app.APP_BUILD=license_resilience.APP_BUILD
 
 class FinalApp(AdminRegistryApp, AIQualityApp):
-    """Final packaged UI: licensing/registry plus the real AI processing implementation."""
+    """Final packaged UI: registry controls layered on the AI implementation.
+
+    AdminRegistryApp already inherits from AIQualityApp through LicenseApp /
+    WorkstationStatsApp. Listing AIQualityApp a second time after it caused Python MRO
+    to resolve current_options through older patched bases in packaged builds.
+    """
     pass
+
+# Force the final renderer back to the mode-aware AI wrapper after all legacy UI/effect
+# patch imports above. Several old modules replace app.compose_image during import.
+import app as _app
+import cheviplus_ai_quality as _aiq
+_app.compose_image = _aiq.compose_image
+_app.remove_background = _aiq.remove_background
 
 if __name__=='__main__':
     prepare_upgrade_environment(license_resilience.APP_VERSION)
