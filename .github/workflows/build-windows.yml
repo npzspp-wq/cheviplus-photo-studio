@@ -76,10 +76,18 @@ jobs:
           New-Item -ItemType Directory -Force -Path installer-dist | Out-Null
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\CheviplusPhotoStudio.iss"
           Get-ChildItem installer-dist
+      - name: Generate SHA256 checksums
+        shell: pwsh
+        run: |
+          $setup = Get-FileHash "installer-dist/Cheviplus-Photo-Studio-Setup.exe" -Algorithm SHA256
+          "$($setup.Hash.ToLower())  Cheviplus-Photo-Studio-Setup.exe" | Set-Content "installer-dist/SHA256SUMS.txt" -Encoding ascii
+          Get-Content "installer-dist/SHA256SUMS.txt"
       - uses: actions/upload-artifact@v4
         with:
           name: Cheviplus-Photo-Studio-Setup
-          path: installer-dist/Cheviplus-Photo-Studio-Setup.exe
+          path: |
+            installer-dist/Cheviplus-Photo-Studio-Setup.exe
+            installer-dist/SHA256SUMS.txt
           retention-days: 30
       - uses: actions/upload-artifact@v4
         with:
