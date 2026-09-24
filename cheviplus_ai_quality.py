@@ -194,80 +194,63 @@ def _remove_flat_support_surface(original, alpha_array):
 
 
 def build_product_only_mask(original):
- """Product-first extractor for wide dark automotive parts on busy photo stands.
+ """Validated product-only extractor.
 
- The band is derived from the photo itself. Thin rack/background structures are
- suppressed before selecting the horizontally dominant part. Growth is deliberately
- short so logos visible through real openings do not get re-attached to the product.
+ Uses a geometry-seeded GrabCut pass to separate a large automotive part from
+ branded banners, racks and pale supports, then removes thin rack structures.
+ Falls back to the quality model if OpenCV is unavailable.
  """
- import numpy as np
- from scipy import ndimage
- rgb=np.asarray(original.convert("RGB"),dtype=np.float32)
- lum=rgb.mean(axis=2); chroma=rgb.max(axis=2)-rgb.min(axis=2)
- h,w=lum.shape; yy,xx=np.indices((h,w)); area=h*w
+ try:
+  import cv2
+  import numpy as np
+  from scipy import ndimage
+  rgb=np.asarray(original.convert("RGB"),dtype=np.uint8)
+  h,w=rgb.shape[:2]; yy,xx=np.indices((h,w))
+  f=rgb.astype(np.float32); lum=f.mean(axis=2); chroma=f.max(axis=2)-f.min(axis=2)
 
- dark=(lum<=120)&(chroma<=90)
- row_density=dark.mean(axis=1)
- candidate_rows=np.where((np.arange(h)>=int(h*.28))&(np.arange(h)<=int(h*.88))&(row_density>=.62))[0]
- runs=[]
- if len(candidate_rows):
-  first=prev=int(candidate_rows[0])
-  for y in candidate_rows[1:]:
-   y=int(y)
-   if y==prev+1:prev=y
-   else:runs.append((first,prev)); first=prev=y
-  runs.append((first,prev))
- if runs:
-  band=max(runs,key=lambda r:r[1]-r[0])
-  y0=max(int(h*.34),band[0]-20)
-  y1=min(int(h*.84),band[1]+38)
- else:
-  y0,y1=int(h*.38),int(h*.82)
- roi=(yy>=y0)&(yy<=y1)
+  # Find the dominant dark horizontal band instead of assuming a fixed product height.
+  dark=(lum<=120)&(chroma<=95)
+  density=dark.mean(axis=1)
+  rows=np.where((np.arange(h)>=int(h*.25))&(np.arange(h)<=int(h*.90))&(density>=.55))[0]
+  if len(rows):
+   groups=np.split(rows,np.where(np.diff(rows)>1)[0]+1)
+   band=max(groups,key=len)
+   y0=max(0,int(band[0])-18); y1=min(h-1,int(band[-1])+38)
+  else:
+   y0,y1=int(h*.35),int(h*.82)
 
- seed=roi&(lum<=125)&(chroma<=100)
- # Horizontal opening removes fence/rack bars while retaining a wide bumper/trim part.
- seed=ndimage.binary_opening(seed,np.ones((3,9),dtype=bool))
- labels,count=ndimage.label(seed)
- best_idx=0; best_score=-1.0
- for idx in range(1,count+1):
-  ys,xs=np.where(labels==idx)
-  if len(xs)<int(area*.004):continue
-  bw=int(xs.max()-xs.min()+1); bh=int(ys.max()-ys.min()+1)
-  if bw<int(w*.42):continue
-  horizontal=bw/max(1,bh)
-  score=len(xs)*(1+2.5*bw/w)*(1+min(5.0,horizontal)*.25)
-  if score>best_score:best_score=score; best_idx=idx
- if not best_idx:
+  gc=np.full((h,w),cv2.GC_PR_BGD,np.uint8)
+  gc[(yy<y0)|(yy>y1)]=cv2.GC_BGD
+  gc[(lum>185)&(chroma<85)]=cv2.GC_BGD
+  gc[(yy>=y0)&(yy<=y1)&(lum<150)]=cv2.GC_PR_FGD
+
+  # Sure foreground is the dark material across the central width. This avoids
+  # teaching GrabCut that side fence/rack lines are part of the product.
+  cx0,cx1=int(w*.09),int(w*.91)
+  sy0=max(y0,int(h*.43)); sy1=min(y1,int(h*.70))
+  sure=(yy>=sy0)&(yy<=sy1)&(xx>=cx0)&(xx<=cx1)&(lum<100)
+  gc[sure]=cv2.GC_FGD
+  if not np.any(sure):
+   return build_quality_mask(original)
+
+  bgd=np.zeros((1,65),np.float64); fgd=np.zeros((1,65),np.float64)
+  bgr=cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR)
+  cv2.grabCut(bgr,gc,None,bgd,fgd,7,cv2.GC_INIT_WITH_MASK)
+  keep=(gc==cv2.GC_FGD)|(gc==cv2.GC_PR_FGD)
+
+  # Thin fence/rack strokes disappear; broad moulded product surfaces remain.
+  keep=ndimage.binary_opening(keep,np.ones((5,5),dtype=bool))
+  labels,count=ndimage.label(keep)
+  if count:
+   sizes=np.bincount(labels.ravel()); sizes[0]=0
+   keep=labels==int(sizes.argmax())
+
+  alpha=np.zeros((h,w),dtype=np.uint8); alpha[keep]=255
+  edge=ndimage.binary_dilation(keep,iterations=1)&~keep
+  alpha[edge]=96
+  return Image.fromarray(alpha,mode="L")
+ except Exception:
   return build_quality_mask(original)
-
- core=labels==best_idx
- allowed=roi&(lum<=175)&(chroma<=120)
- product=core.copy()
- # Only a short geodesic expansion: enough for antialiased/grey moulded edges, not
- # enough to bridge from the part into printed logos behind openings.
- for _ in range(4):
-  product|=ndimage.binary_dilation(product,np.ones((3,3),bool))&allowed
-
- # Remove broad pale stands/boxes even where they overlap the part silhouette.
- pale=roi&(lum>=145)&(chroma<=72)
- pale=ndimage.binary_opening(pale,np.ones((3,3),bool))
- plabels,pcount=ndimage.label(pale)
- for idx in range(1,pcount+1):
-  ys,xs=np.where(plabels==idx)
-  if len(xs)<int(area*.0007):continue
-  bw=int(xs.max()-xs.min()+1); bh=int(ys.max()-ys.min()+1)
-  if bw>=int(w*.025) and bh>=int(h*.025):
-   product[ndimage.binary_dilation(plabels==idx,iterations=1)]=False
-
- # Keep only material still connected to the selected horizontal product.
- labels2,_=ndimage.label(product)
- core_ids=np.unique(labels2[core]); core_ids=core_ids[core_ids>0]
- keep=np.isin(labels2,core_ids) if len(core_ids) else core
- alpha=np.zeros((h,w),dtype=np.uint8); alpha[keep]=255
- edge=ndimage.binary_dilation(keep,iterations=1)&~keep
- alpha[edge]=96
- return Image.fromarray(alpha,mode="L")
 
 def remove_background(img,**kwargs):
  mode=getattr(_LOCAL,"mode",MODE_FAST)
