@@ -20,7 +20,7 @@ import cheviplus_license as lic
 import cheviplus_ui_cleanup_532 as ui
 
 APP_VERSION = "5.36"
-APP_BUILD = "2026.09.24.07"
+APP_BUILD = "2026.09.24.08"
 GRACE_DAYS = 30
 WARN_DAYS = 30
 
