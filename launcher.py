@@ -39,11 +39,30 @@ class FinalApp(AdminRegistryApp, AIQualityApp):
     """
     pass
 
-# Force the final renderer back to the mode-aware AI wrapper after all legacy UI/effect
-# patch imports above. Several old modules replace app.compose_image during import.
+# Keep the final legacy renderer (plexiglass/workspace compatibility), but inject the
+# selected AI mode into its thread-local background-removal engine. Replacing the final
+# renderer with ai_quality.compose_image dropped newer keyword arguments such as
+# plexiglass_enabled and caused preview failures in Build .06.
 import app as _app
 import cheviplus_ai_quality as _aiq
-_app.compose_image = _aiq.compose_image
+
+_FINAL_COMPOSE = _app.compose_image
+
+def _mode_aware_final_compose(*args, **kwargs):
+    mode = kwargs.get("processing_mode", _aiq.MODE_FAST)
+    mode = mode if mode in _aiq.MODES else _aiq.MODE_FAST
+    previous_mode = getattr(_aiq._LOCAL, "mode", _aiq.MODE_FAST)
+    previous_key = getattr(_aiq._LOCAL, "cache_key", None)
+    source = args[0] if args else kwargs.get("source")
+    _aiq._LOCAL.mode = mode
+    _aiq._LOCAL.cache_key = _aiq._cache_key_from_source(source, mode)
+    try:
+        return _FINAL_COMPOSE(*args, **kwargs)
+    finally:
+        _aiq._LOCAL.mode = previous_mode
+        _aiq._LOCAL.cache_key = previous_key
+
+_app.compose_image = _mode_aware_final_compose
 _app.remove_background = _aiq.remove_background
 
 if __name__=='__main__':
