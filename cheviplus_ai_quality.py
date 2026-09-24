@@ -15,7 +15,7 @@ import cheviplus_product_cutout as pc
 import cheviplus_backdrop_quality as bq
 
 APP_VERSION="5.36"
-APP_BUILD="2026.09.23.04"
+APP_BUILD="2026.09.24.05"
 MODE_FAST="Быстро — локально"
 MODE_QUALITY="Максимальное качество AI — локально"
 MODE_PRODUCT_ONLY="Товар без упаковки — точно"
@@ -194,60 +194,77 @@ def _remove_flat_support_surface(original, alpha_array):
 
 
 def build_product_only_mask(original):
- """Product-first segmentation: identify the long dark automotive part, not the whole scene."""
+ """Deterministic dark-product extractor for catalogue photos.
+
+ Unlike the normal AI modes, this path does NOT trust BiRefNet's foreground silhouette.
+ It builds the object from image pixels and geometry, so a branded backdrop/package
+ cannot remain merely because the AI called it foreground.
+ """
  import numpy as np
  from scipy import ndimage
- raw=np.asarray(_quality_segment_alpha(original),dtype=np.uint8)
  rgb=np.asarray(original.convert("RGB"),dtype=np.float32)
  lum=rgb.mean(axis=2); chroma=rgb.max(axis=2)-rgb.min(axis=2)
  h,w=lum.shape; yy,xx=np.indices((h,w)); area=h*w
 
- # Automotive catalogue photos often contain a long black bumper/body part against a
- # branded banner, rack and table. Build an independent object seed from appearance and
- # geometry, instead of accepting the foreground model's entire silhouette.
- roi=(yy>=int(h*.38))&(yy<=int(h*.86))
- seed=roi&(lum<=105)&(chroma<=72)
- seed=ndimage.binary_opening(seed,structure=np.ones((3,3),bool))
- seed=ndimage.binary_closing(seed,structure=np.ones((9,9),bool),iterations=2)
+ # Broad working band: most 1C product photos place the part around the middle/lower half.
+ roi=(yy>=int(h*.30))&(yy<=int(h*.90))
+
+ # Strong dark material seed. The bumper/body part is large and horizontally dominant.
+ seed=roi&(lum<=112)&(chroma<=85)
+ seed=ndimage.binary_opening(seed,np.ones((3,3),bool))
+ seed=ndimage.binary_closing(seed,np.ones((11,11),bool),iterations=2)
  labels,count=ndimage.label(seed)
- best=None
- for idx in range(1,count+1):
-  ys,xs=np.where(labels==idx); n=len(xs)
-  if n<int(area*.008):continue
-  bw=xs.max()-xs.min()+1; bh=ys.max()-ys.min()+1
-  # Prefer the wide, substantial catalogue product; reject rack bars and small props.
-  score=n*(1.0+2.2*(bw/w))*(1.0+0.5*(bw/max(1,bh)))
-  if bw<w*.28:score*=.15
-  if best is None or score>best[0]:best=(score,idx)
- if best is None:
+ if not count:
   return build_quality_mask(original)
 
- core=labels==best[1]
- # Keep the product's genuine AI edge only close to the independently detected core.
- near=ndimage.binary_dilation(core,iterations=max(5,int(min(h,w)*.018)))
- candidate=(raw>=28)&near
- # Add dark/medium product material connected to the core even where AI confidence dips.
- material=roi&(lum<=145)&(chroma<=90)
- grow=core.copy()
- for _ in range(max(6,int(min(h,w)*.012))):
-  grow|=ndimage.binary_dilation(grow,structure=np.ones((3,3),bool))&material
- product=candidate|grow
- product=ndimage.binary_closing(product,structure=np.ones((3,3),bool),iterations=1)
+ best_idx=0; best_score=-1.0
+ for idx in range(1,count+1):
+  ys,xs=np.where(labels==idx); n=len(xs)
+  if n<int(area*.004):continue
+  bw=int(xs.max()-xs.min()+1); bh=int(ys.max()-ys.min()+1)
+  if bw<int(w*.22):continue
+  horizontal=bw/max(1,bh)
+  centre=1.0-abs(float(xs.mean())-w/2)/(w/2)
+  score=n*(1+3.0*bw/w)*(1+min(4.0,horizontal)*.35)*(0.7+0.3*centre)
+  if score>best_score:best_score=score; best_idx=idx
+ if not best_idx:
+  return build_quality_mask(original)
 
- # White/light foreground props (the centre stand/box) are never allowed to become product.
- prop=(lum>=155)&(chroma<=55)&(yy>=int(h*.48))
- prop=ndimage.binary_opening(prop,structure=np.ones((3,3),bool))
- plabels,pcount=ndimage.label(prop)
+ core=labels==best_idx
+
+ # Grow through plausible dark/medium product material only. This recovers antialiased
+ # edges and moulded grey areas without flooding into white banner, table or packaging.
+ allowed=roi&(lum<=155)&(chroma<=110)
+ product=core.copy()
+ for _ in range(max(8,int(min(h,w)*.018))):
+  nxt=product|(ndimage.binary_dilation(product,np.ones((3,3),bool))&allowed)
+  if np.array_equal(nxt,product):break
+  product=nxt
+
+ # Smooth tiny edge breaks but never fill the large real openings in a bumper.
+ product=ndimage.binary_closing(product,np.ones((3,3),bool),iterations=1)
+
+ # Explicitly remove large pale props/stands that overlap the product silhouette.
+ pale=roi&(lum>=150)&(chroma<=65)
+ pale=ndimage.binary_opening(pale,np.ones((3,3),bool))
+ plabels,pcount=ndimage.label(pale)
  for idx in range(1,pcount+1):
   ys,xs=np.where(plabels==idx)
-  if len(xs)<int(area*.001):continue
-  bw=xs.max()-xs.min()+1; bh=ys.max()-ys.min()+1
-  if bw>=w*.035 and bh>=h*.035:
-   product[plabels==idx]=False
+  if len(xs)<int(area*.0008):continue
+  bw=int(xs.max()-xs.min()+1); bh=int(ys.max()-ys.min()+1)
+  if bw>=int(w*.025) and bh>=int(h*.025):
+   prop=ndimage.binary_dilation(plabels==idx,iterations=1)
+   product[prop]=False
 
- alpha=np.where(product,raw,0).astype(np.uint8)
- alpha[core]=np.maximum(alpha[core],235)
- alpha[alpha<24]=0
+ # Keep only components attached to the chosen product core.
+ labels2,n2=ndimage.label(product)
+ core_ids=np.unique(labels2[core])
+ keep=np.isin(labels2,core_ids[core_ids>0]) if np.any(core_ids>0) else core
+ alpha=np.zeros((h,w),dtype=np.uint8)
+ alpha[keep]=255
+ # One-pixel feather for a natural edge.
+ edge=ndimage.binary_dilation(keep,iterations=1)&~keep
+ alpha[edge]=96
  return Image.fromarray(alpha,mode="L")
 
 def remove_background(img,**kwargs):
