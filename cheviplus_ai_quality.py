@@ -1,4 +1,4 @@
-"""Cheviplus Photo Studio 5.9: two proven modes with admin-only service controls."""
+"""Cheviplus Photo Studio 5.36: AI cutout modes including aggressive package/support removal."""
 from __future__ import annotations
 from collections import OrderedDict
 from pathlib import Path
@@ -14,11 +14,12 @@ import app
 import cheviplus_product_cutout as pc
 import cheviplus_backdrop_quality as bq
 
-APP_VERSION="5.9"
-APP_BUILD="2026.08.11.07"
+APP_VERSION="5.36"
+APP_BUILD="2026.09.24.05"
 MODE_FAST="Быстро — локально"
 MODE_QUALITY="Максимальное качество AI — локально"
-MODES=(MODE_FAST, MODE_QUALITY)
+MODE_PRODUCT_ONLY="Товар без упаковки — точно"
+MODES=(MODE_FAST, MODE_QUALITY, MODE_PRODUCT_ONLY)
 QUALITY_MAX_SIDE=1600
 MASK_CACHE_LIMIT=16
 PIN_ITERATIONS=200_000
@@ -92,7 +93,7 @@ def _quality_segment_alpha(image):
 
 
 def _cache_key_from_source(source,mode):
- if mode!=MODE_QUALITY:return None
+ if mode not in (MODE_QUALITY, MODE_PRODUCT_ONLY):return None
  try:
   path=Path(source).resolve(); stat=path.stat(); return(str(path).lower(),stat.st_mtime_ns,stat.st_size,mode)
  except Exception:return None
@@ -135,12 +136,130 @@ def build_quality_mask(original):
  return Image.fromarray(combined,mode="L")
 
 
+
+def _remove_flat_support_surface(original, alpha_array):
+ """Remove large, smooth, pale cardboard/paper/support surfaces while preserving the product.
+
+ This is intentionally used only by MODE_PRODUCT_ONLY. It removes actual pixels that
+ look like a broad neutral support, rather than trusting the segmentation model to
+ distinguish "product" from packaging. Dark/coloured/chrome product pixels are protected.
+ """
+ import numpy as np
+ from scipy import ndimage
+
+ a=np.asarray(alpha_array,dtype=np.uint8).copy()
+ rgb=np.asarray(original.convert("RGB"),dtype=np.float32)
+ lum=rgb.mean(axis=2)
+ chroma=rgb.max(axis=2)-rgb.min(axis=2)
+
+ # Flatness estimate: packaging/table boards are broad low-texture neutral regions.
+ gray=lum
+ local_mean=ndimage.gaussian_filter(gray,sigma=2.0)
+ local_sq=ndimage.gaussian_filter(gray*gray,sigma=2.0)
+ local_std=np.sqrt(np.maximum(0.0,local_sq-local_mean*local_mean))
+
+ candidate=(a>=72)&(lum>=105)&(lum<=248)&(chroma<=48)&(local_std<=18)
+ candidate=ndimage.binary_closing(candidate,structure=np.ones((5,5),dtype=bool),iterations=2)
+ labels,count=ndimage.label(candidate)
+ if not count:return a
+
+ h,w=a.shape
+ image_area=h*w
+ remove=np.zeros_like(candidate,dtype=bool)
+ for idx in range(1,count+1):
+  comp=labels==idx
+  n=int(comp.sum())
+  if n<int(image_area*.012):continue
+  ys,xs=np.nonzero(comp)
+  if not len(xs):continue
+  bw=int(xs.max()-xs.min()+1); bh=int(ys.max()-ys.min()+1)
+  bbox=max(1,bw*bh); fill=n/bbox
+  broad=(bw>=w*.20 and bh>=h*.12) or (bw>=w*.12 and bh>=h*.20)
+  if broad and fill>=.22:remove|=comp
+
+ if not remove.any():return a
+
+ # Grow only through still-neutral pixels so printing/shadows on the same board disappear,
+ # but black rubber/plastic and coloured product material remain protected.
+ neutral=(lum>=82)&(chroma<=68)&(local_std<=34)&(a>=28)
+ grown=remove.copy()
+ for _ in range(5):
+  grown|=ndimage.binary_dilation(grown,structure=np.ones((3,3),dtype=bool))&neutral
+
+ # Feather one pixel at the product/support boundary.
+ edge=ndimage.binary_dilation(grown,iterations=1)&~grown
+ a[grown]=0
+ a[edge]=np.minimum(a[edge],96)
+ return a
+
+
+def build_product_only_mask(original):
+ """Validated product-only extractor.
+
+ Uses a geometry-seeded GrabCut pass to separate a large automotive part from
+ branded banners, racks and pale supports, then removes thin rack structures.
+ Falls back to the quality model if OpenCV is unavailable.
+ """
+ try:
+  import cv2
+  import numpy as np
+  from scipy import ndimage
+  rgb=np.asarray(original.convert("RGB"),dtype=np.uint8)
+  h,w=rgb.shape[:2]; yy,xx=np.indices((h,w))
+  f=rgb.astype(np.float32); lum=f.mean(axis=2); chroma=f.max(axis=2)-f.min(axis=2)
+
+  # Find the dominant dark horizontal band instead of assuming a fixed product height.
+  dark=(lum<=120)&(chroma<=95)
+  density=dark.mean(axis=1)
+  rows=np.where((np.arange(h)>=int(h*.25))&(np.arange(h)<=int(h*.90))&(density>=.55))[0]
+  if len(rows):
+   groups=np.split(rows,np.where(np.diff(rows)>1)[0]+1)
+   band=max(groups,key=len)
+   y0=max(0,int(band[0])-18); y1=min(h-1,int(band[-1])+38)
+  else:
+   y0,y1=int(h*.35),int(h*.82)
+
+  gc=np.full((h,w),cv2.GC_PR_BGD,np.uint8)
+  gc[(yy<y0)|(yy>y1)]=cv2.GC_BGD
+  gc[(lum>185)&(chroma<85)]=cv2.GC_BGD
+  gc[(yy>=y0)&(yy<=y1)&(lum<150)]=cv2.GC_PR_FGD
+
+  # Sure foreground is the dark material across the central width. This avoids
+  # teaching GrabCut that side fence/rack lines are part of the product.
+  cx0,cx1=int(w*.09),int(w*.91)
+  sy0=max(y0,int(h*.43)); sy1=min(y1,int(h*.70))
+  sure=(yy>=sy0)&(yy<=sy1)&(xx>=cx0)&(xx<=cx1)&(lum<100)
+  gc[sure]=cv2.GC_FGD
+  if not np.any(sure):
+   return build_quality_mask(original)
+
+  bgd=np.zeros((1,65),np.float64); fgd=np.zeros((1,65),np.float64)
+  bgr=cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR)
+  cv2.grabCut(bgr,gc,None,bgd,fgd,7,cv2.GC_INIT_WITH_MASK)
+  keep=(gc==cv2.GC_FGD)|(gc==cv2.GC_PR_FGD)
+
+  # Thin fence/rack strokes disappear; broad moulded product surfaces remain.
+  keep=ndimage.binary_opening(keep,np.ones((5,5),dtype=bool))
+  labels,count=ndimage.label(keep)
+  if count:
+   sizes=np.bincount(labels.ravel()); sizes[0]=0
+   keep=labels==int(sizes.argmax())
+
+  alpha=np.zeros((h,w),dtype=np.uint8); alpha[keep]=255
+  edge=ndimage.binary_dilation(keep,iterations=1)&~keep
+  alpha[edge]=96
+  return Image.fromarray(alpha,mode="L")
+ except Exception:
+  return build_quality_mask(original)
+
 def remove_background(img,**kwargs):
  mode=getattr(_LOCAL,"mode",MODE_FAST)
- if mode!=MODE_QUALITY:return _FAST_REMOVE(img,**kwargs)
+ if mode==MODE_FAST:return _FAST_REMOVE(img,**kwargs)
  try:
   key=getattr(_LOCAL,"cache_key",None); mask=_cache_get(key); hit=mask is not None
-  if mask is None:mask=build_quality_mask(img); _cache_put(key,mask)
+  if mask is None:
+   mask=build_product_only_mask(img) if mode==MODE_PRODUCT_ONLY else build_quality_mask(img)
+   _cache_put(key,mask)
   rgba=img.convert("RGBA"); rgba.putalpha(mask); info=app.analyze_object_shape(mask); info["mask_cache_hit"]=hit
   return rgba,info
  except Exception as exc:
@@ -176,7 +295,7 @@ class AIQualityApp(bq.BackdropQualityApp):
   ttk.Label(frame,text="Качество AI:").grid(row=7,column=0,sticky="w",pady=(10,4))
   self.ai_quality_combo=ttk.Combobox(frame,textvariable=self.ai_quality_var,values=MODES,state="readonly",width=36)
   self.ai_quality_combo.grid(row=7,column=1,columnspan=4,sticky="w",padx=8,pady=(10,4))
-  ttk.Label(frame,text="Быстрый режим — для массовой обработки. Максимальное качество — BiRefNet Lite для сложных фото.",wraplength=720).grid(row=8,column=0,columnspan=6,sticky="w",pady=(0,4))
+  ttk.Label(frame,text="Быстро — массовая обработка. Максимальное качество — сложные контуры. Товар без упаковки — убирает картон, листы и светлые подставки.",wraplength=720).grid(row=8,column=0,columnspan=6,sticky="w",pady=(0,4))
   admin_bar=ttk.Frame(frame); admin_bar.grid(row=9,column=0,columnspan=6,sticky="w",pady=(8,3))
   self.admin_button=ttk.Button(admin_bar,text="🔒 Администратор",command=self._toggle_admin_settings)
   self.admin_button.pack(side="left")
@@ -241,7 +360,13 @@ class AIQualityApp(bq.BackdropQualityApp):
   messagebox.showinfo("PIN","PIN администратора изменён.",parent=self)
 
  def current_options(self):
-  options=super().current_options(); options["processing_mode"]=self.ai_quality_var.get(); return options
+  options=super().current_options()
+  mode=self.ai_quality_var.get()
+  options["processing_mode"]=mode
+  # Diagnostic breadcrumb visible in normal operation so we can prove which engine ran.
+  try:self.status.set("Выбран режим AI: "+mode)
+  except Exception:pass
+  return options
  def _begin_ai_indicator(self,text):
   self._ai_busy=True; self._ai_busy_phase=0; self._ai_busy_text=text; self.progress.configure(mode="indeterminate"); self.progress.start(12); self._animate_ai_indicator()
  def _animate_ai_indicator(self):
@@ -254,7 +379,7 @@ class AIQualityApp(bq.BackdropQualityApp):
   if self.status.get().startswith("Создание предпросмотра"):self._begin_ai_indicator("AI обрабатывает фото — пожалуйста, подождите")
  def show_preview(self,image,name):
   self._end_ai_indicator(); super().show_preview(image,name)
-  if self.ai_quality_var.get()==MODE_QUALITY:self.status.set("Предпросмотр готов • AI-маска сохранена для быстрой обработки")
+  if self.ai_quality_var.get() in (MODE_QUALITY,MODE_PRODUCT_ONLY):self.status.set("Предпросмотр готов • AI-маска сохранена для быстрой обработки")
  def start(self):
   super().start()
   if str(self.start_btn.cget("state"))=="disabled":self._begin_ai_indicator("AI обрабатывает фотографии")

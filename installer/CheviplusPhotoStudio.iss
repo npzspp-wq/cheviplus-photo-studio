@@ -1,5 +1,5 @@
 #define MyAppName "Cheviplus Photo Studio"
-#define MyAppVersion "5.34"
+#define MyAppVersion "5.36.0.6"
 #define MyAppPublisher "Cheviplus"
 #define MyAppExeName "Cheviplus Photo Studio.exe"
 
@@ -8,6 +8,12 @@ AppId={{A2F11BC4-7E17-4D58-9C57-2A2E5E3075C8}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+VersionInfoVersion=5.36.0.6
+VersionInfoCompany=Cheviplus
+VersionInfoDescription=Cheviplus Photo Studio
+VersionInfoProductName=Cheviplus Photo Studio
+VersionInfoProductVersion=5.36.0.6
+VersionInfoCopyright=Cheviplus
 DefaultDirName={localappdata}\Cheviplus Photo Studio
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes

@@ -11,7 +11,7 @@ class AIQualityTests(unittest.TestCase):
     def test_modes_are_explicit(self):
         self.assertIn(aq.MODE_FAST, aq.MODES)
         self.assertIn(aq.MODE_QUALITY, aq.MODES)
-        self.assertEqual(len(set(aq.MODES)), 2)
+        self.assertEqual(len(set(aq.MODES)), 3)
 
     def test_quality_session_model_name_is_birefnet_lite(self):
         source = aq.get_quality_session.__code__.co_consts

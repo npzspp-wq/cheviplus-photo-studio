@@ -1006,7 +1006,7 @@ class App(tk.Tk):
 
     def preview_worker(self):
         try:
-            image = compose_image(self.preview_source, **self.current_options())
+            image = globals()["compose_image"](self.preview_source, **self.current_options())
             image.thumbnail((520, 620), Image.Resampling.LANCZOS)
             self.ui_queue.put(("preview", image.copy(), self.preview_source.name))
         except Exception as exc:
@@ -1068,7 +1068,7 @@ class App(tk.Tk):
                     target_dir = output_root / source.parent.relative_to(input_root)
             except Exception:
                 pass
-            image = compose_image(source, **options)
+            image = globals()["compose_image"](source, **options)
             out = save_result(
                 image,
                 source,

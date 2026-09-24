@@ -1,4 +1,4 @@
-"""Cheviplus Photo Studio 5.35 — resilient workstation licensing.
+"""Cheviplus Photo Studio 5.36 — resilient workstation licensing.
 
 Goals:
 - Windows/hardware changes must not unexpectedly stop an operator.
@@ -19,8 +19,8 @@ import app
 import cheviplus_license as lic
 import cheviplus_ui_cleanup_532 as ui
 
-APP_VERSION = "5.35"
-APP_BUILD = "2026.09.11.01"
+APP_VERSION = "5.36"
+APP_BUILD = "2026.09.24.11"
 GRACE_DAYS = 30
 WARN_DAYS = 30
 
@@ -187,7 +187,7 @@ lic.save_license = save_license_resilient
 lic.license_state = license_state_resilient
 lic.LicenseApp._license_required = _friendly_license_required
 
-# Make 5.35 visible throughout the existing layered UI without rewriting modules.
+# Make 5.36 visible throughout the existing layered UI without rewriting modules.
 ui.APP_VERSION = APP_VERSION
 ui.APP_BUILD = APP_BUILD
 app.APP_VERSION = APP_VERSION
